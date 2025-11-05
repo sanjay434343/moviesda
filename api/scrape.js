@@ -50,11 +50,8 @@ export default async function handler(req, res) {
       const html = await fetchHtml(downloadPageUrl);
       const $ = cheerio.load(html);
 
-      const details = {
-        title: $("title").text().trim(),
-        img: $(".albumcover img").attr("src") || null,
+      const fileDetails = {
         size: $(".details:contains('File Size')").text().replace("File Size:", "").trim(),
-        videoSize: $(".details:contains('Video Size')").text().replace("Video Size:", "").trim(),
         format: $(".details:contains('Format')").text().replace("Format:", "").trim(),
         duration: $(".details:contains('Duration')").text().replace("Duration:", "").trim(),
         addedOn: $(".details:contains('Added On')").text().replace("Added On:", "").trim(),
@@ -62,27 +59,23 @@ export default async function handler(req, res) {
         cdn: [],
       };
 
-      if (details.img && details.img.startsWith("/")) {
-        details.img = `${baseURL}${details.img}`;
-      }
-
       $(".download .dlink a").each((_, el) => {
         const name = $(el).text().trim();
         const href = $(el).attr("href");
         if (href) {
-          details.servers.push({
+          fileDetails.servers.push({
             name,
             url: href.startsWith("http") ? href : `${baseURL}${href}`,
           });
         }
       });
 
-      for (const server of details.servers) {
+      for (const server of fileDetails.servers) {
         const cdn = await getFinalCdnUrl(server.url);
-        if (cdn) details.cdn.push(cdn);
+        if (cdn) fileDetails.cdn.push(cdn);
       }
 
-      return details;
+      return fileDetails;
     } catch {
       return null;
     }
@@ -92,23 +85,28 @@ export default async function handler(req, res) {
     const html = await fetchHtml(movieUrl);
     const $ = cheerio.load(html);
 
+    // ✅ Capture poster from main page (not inner pages)
+    const poster = $("div.f img").first().attr("src")
+      ? `${baseURL}${$("div.f img").first().attr("src")}`
+      : null;
+
+    const movieName =
+      $("title").text().replace("Full Movie Download", "").trim() || "Unknown Movie";
+
     const versions = [];
 
     $("div.f").each((_, el) => {
       const title = $(el).find("a").text().trim();
       const href = $(el).find("a").attr("href");
-      const img = $(el).find("img").attr("src");
       if (href && title) {
         versions.push({
           title,
           url: href.startsWith("http") ? href : `${baseURL}${href}`,
-          img: img ? `${baseURL}${img}` : null,
         });
       }
     });
 
-    const movieName = $("title").text().replace("Full Movie Download", "").trim() || "Unknown Movie";
-    const finalResults = [];
+    const qualityMap = {};
 
     for (const version of versions) {
       try {
@@ -127,39 +125,35 @@ export default async function handler(req, res) {
           .get()
           .map((u) => (u.startsWith("http") ? u : `${baseURL}${u}`));
 
-        const data = await extractDownloadPageData(servers[0]);
-        if (!data) continue;
+        const fileData = await extractDownloadPageData(servers[0]);
+        if (!fileData) continue;
 
-        // Quality from version title
         const quality =
           version.title.match(/1080p/i)
-            ? "1080p HD"
+            ? "1080p"
             : version.title.match(/720/i)
-            ? "720p HD"
+            ? "720p"
             : version.title.match(/360/i)
-            ? "360p HD"
-            : "Unknown";
+            ? "360p"
+            : "unknown";
 
-        finalResults.push({
-          image: data.img,
-          quality,
-          size: data.size,
-          duration: data.duration,
-          format: data.format,
-          addedOn: data.addedOn,
-          description: data.title || `${movieName} ${quality} Tamil Movie`,
-          cdn: Object.fromEntries([
-            [quality.replace(" HD", ""), data.cdn[0] || null],
-          ]),
-        });
+        qualityMap[quality] = {
+          size: fileData.size,
+          duration: fileData.duration,
+          format: fileData.format,
+          addedOn: fileData.addedOn,
+          cdn: fileData.cdn[0] || null,
+        };
       } catch (err) {
-        console.log("⚠️ Failed sub:", version.title, err.message);
+        console.log("⚠️ Error fetching version:", version.title, err.message);
       }
     }
 
     return {
       movie: movieName,
-      results: finalResults,
+      image: poster,
+      description: `${movieName} Tamil Movie HD Download`,
+      results: qualityMap,
     };
   }
 
@@ -191,7 +185,7 @@ export default async function handler(req, res) {
 
     res.status(200).json({
       movie: "Unknown",
-      results: [],
+      results: {},
     });
   } catch (err) {
     res.status(500).json({
