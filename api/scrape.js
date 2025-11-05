@@ -2,34 +2,33 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  // ✅ Allow all origins
+  // ✅ Allow all origins (CORS)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const { url, lang, year, search, date } = req.query;
-
-  const baseURL = "https://moviesda14.com";
-  const language = lang || search || "tamil";
-  const yearOrDate = year || date || "2021";
-
+  // 🧠 Dynamic target URL
+  const { url } = req.query;
   const targetURL = url
     ? decodeURIComponent(url)
-    : `${baseURL}/${language}-${yearOrDate}-movies/`;
+    : "https://moviesda14.com/tamil-2021-movies/";
 
   try {
+    // 🌐 Fetch HTML content
     const { data: html } = await axios.get(targetURL, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+        Referer: "https://google.com",
       },
     });
 
     const $ = cheerio.load(html);
     const results = [];
 
-    // 🧠 Metadata
+    // 🎬 Metadata extraction
     const metadata = {
       title:
         $("title").text().trim() ||
@@ -41,60 +40,87 @@ export default async function handler(req, res) {
         $("p").first().text().trim() ||
         null,
       image:
-        $("img").first().attr("src") &&
-        ($("img").first().attr("src").startsWith("http")
-          ? $("img").first().attr("src")
-          : `${baseURL}${$("img").first().attr("src")}`),
+        $('meta[property="og:image"]').attr("content") ||
+        $("img").first().attr("src") ||
+        null,
+      date:
+        $("div.details:contains('Added On')")
+          .text()
+          .replace("Added On:", "")
+          .trim() ||
+        $("time").first().text().trim() ||
+        null,
+      size:
+        $("div.details:contains('File Size')")
+          .text()
+          .replace("File Size:", "")
+          .trim() || null,
+      duration:
+        $("div.details:contains('Duration')")
+          .text()
+          .replace("Duration:", "")
+          .trim() || null,
+      resolution:
+        $("div.details:contains('Resolution')")
+          .text()
+          .replace("Resolution:", "")
+          .trim() ||
+        $("div.details:contains('Video Resolution')")
+          .text()
+          .replace("Video Resolution:", "")
+          .trim() ||
+        null,
     };
 
-    // 🎯 Extract movies from multiple structures
-    // 1️⃣ div.f — standard listing
-    $("div.f").each((i, el) => {
-      const title = $(el).find("a").text().trim();
-      const href = $(el).find("a").attr("href");
-      const img = $(el).find("img").attr("src");
+    // ✅ Normalize relative image URLs
+    if (metadata.image && metadata.image.startsWith("/")) {
+      const base = new URL(targetURL).origin;
+      metadata.image = `${base}${metadata.image}`;
+    }
 
-      if (href && title && !title.toLowerCase().includes("movies")) {
+    // 🎯 Extract main download/watch links
+    const ignoreList = [
+      "facebook",
+      "twitter",
+      "whatsapp",
+      "sms",
+      "dmca",
+      "contact",
+      "home",
+    ];
+
+    $("a").each((i, el) => {
+      const href = $(el).attr("href");
+      const text = $(el).text().trim();
+
+      if (
+        href &&
+        !ignoreList.some((bad) => href.toLowerCase().includes(bad)) &&
+        (href.includes("download") ||
+          href.includes(".mp4") ||
+          href.includes(".mkv") ||
+          href.includes("cdn") ||
+          href.includes("stream") ||
+          href.includes("file") ||
+          href.includes("watch")) &&
+        text.length > 2
+      ) {
+        const base = new URL(targetURL).origin;
+        const fullUrl = href.startsWith("http") ? href : `${base}${href}`;
+
         results.push({
-          title,
-          url: href.startsWith("http") ? href : `${baseURL}${href}`,
-          img: img
-            ? img.startsWith("http")
-              ? img
-              : `${baseURL}${img}`
-            : metadata.image,
+          title: text,
+          url: fullUrl,
         });
       }
     });
 
-    // 2️⃣ div.bf → movie block containers
-    if (results.length === 0) {
-      $("div.bf a").each((i, el) => {
-        const title = $(el).text().trim();
-        const href = $(el).attr("href");
-        if (href && title && href.includes("-movie")) {
-          results.push({
-            title,
-            url: href.startsWith("http") ? href : `${baseURL}${href}`,
-          });
-        }
-      });
+    // 🎞 Add image to each result if found
+    if (metadata.image) {
+      results.forEach((item) => (item.img = metadata.image));
     }
 
-    // 3️⃣ fallback: any <a href="*-movie/">
-    if (results.length === 0) {
-      $("a[href*='-movie']").each((i, el) => {
-        const title = $(el).text().trim();
-        const href = $(el).attr("href");
-        if (href && title && href.includes("-movie")) {
-          results.push({
-            title,
-            url: href.startsWith("http") ? href : `${baseURL}${href}`,
-          });
-        }
-      });
-    }
-
+    // ✅ Return clean JSON response
     res.status(200).json({
       source: targetURL,
       metadata,
@@ -105,7 +131,6 @@ export default async function handler(req, res) {
     res.status(500).json({
       error: "Failed to scrape page",
       details: err.message,
-      source: targetURL,
     });
   }
 }
