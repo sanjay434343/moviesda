@@ -2,6 +2,16 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
+  // ✅ Allow all origins (CORS)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // Handle preflight (OPTIONS) request quickly
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   const targetURL = "https://moviesda14.com/tamil-2021-movies/";
 
   try {
