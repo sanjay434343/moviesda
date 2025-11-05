@@ -6,19 +6,21 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const { url, lang, year, search, date } = req.query;
 
   const baseURL = "https://moviesda14.com";
   const language = lang || search || "tamil";
-  const yearOrDate = year || date || "2021";
+  const yearOrDate = year || date || "2025";
 
   const targetURL = url
     ? decodeURIComponent(url)
     : `${baseURL}/${language}-${yearOrDate}-movies/`;
 
   try {
+    // 🌐 Fetch HTML content
     const { data: html } = await axios.get(targetURL, {
       headers: {
         "User-Agent":
@@ -29,7 +31,7 @@ export default async function handler(req, res) {
     const $ = cheerio.load(html);
     const results = [];
 
-    // 🧠 Metadata
+    // 🧠 Extract Metadata
     const metadata = {
       title:
         $("title").text().trim() ||
@@ -47,8 +49,7 @@ export default async function handler(req, res) {
           : `${baseURL}${$("img").first().attr("src")}`),
     };
 
-    // 🎯 Extract movies from multiple structures
-    // 1️⃣ div.f — standard listing
+    // 🎬 Extract movie list from div.f blocks
     $("div.f").each((i, el) => {
       const title = $(el).find("a").text().trim();
       const href = $(el).find("a").attr("href");
@@ -67,7 +68,7 @@ export default async function handler(req, res) {
       }
     });
 
-    // 2️⃣ div.bf → movie block containers
+    // 🧩 If no .f elements found, try div.bf containers
     if (results.length === 0) {
       $("div.bf a").each((i, el) => {
         const title = $(el).text().trim();
@@ -81,7 +82,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3️⃣ fallback: any <a href="*-movie/">
+    // 🧩 Fallback: Any <a href="*-movie/">
     if (results.length === 0) {
       $("a[href*='-movie']").each((i, el) => {
         const title = $(el).text().trim();
@@ -95,10 +96,43 @@ export default async function handler(req, res) {
       });
     }
 
+    // 🧭 Pagination detection
+    const pagination = {
+      current: $("#currentPage").text().trim() || "1",
+      total: $("#totalPages").text().trim() || null,
+      next: null,
+      prev: null,
+      pages: [],
+    };
+
+    $("ul.pagination a").each((i, el) => {
+      const pageText = $(el).text().trim();
+      const href = $(el).attr("href");
+
+      if (href) {
+        const fullLink = href.startsWith("http")
+          ? href
+          : `${baseURL}${href}`;
+
+        if (pageText === "»" || $(el).hasClass("next")) {
+          pagination.next = fullLink;
+        } else if (pageText === "«" || $(el).hasClass("prev")) {
+          pagination.prev = fullLink;
+        } else if (/^\d+$/.test(pageText)) {
+          pagination.pages.push({
+            page: Number(pageText),
+            url: fullLink,
+          });
+        }
+      }
+    });
+
+    // ✅ Response
     res.status(200).json({
       source: targetURL,
       metadata,
       total: results.length,
+      pagination,
       results,
     });
   } catch (err) {
