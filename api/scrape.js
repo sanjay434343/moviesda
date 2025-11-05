@@ -10,7 +10,7 @@ export default async function handler(req, res) {
 
   const { url } = req.query;
   const baseURL = "https://moviesda14.com";
-  const targetURL = url ? decodeURIComponent(url) : `${baseURL}/tamil-2025-movies/`;
+  const targetURL = url ? decodeURIComponent(url) : `${baseURL}/`;
 
   try {
     const { data: html } = await axios.get(targetURL, {
@@ -22,7 +22,7 @@ export default async function handler(req, res) {
 
     const $ = cheerio.load(html);
 
-    // 🧠 Basic metadata
+    // ✅ Metadata
     const metadata = {
       title:
         $("title").text().trim() ||
@@ -35,81 +35,67 @@ export default async function handler(req, res) {
       poster: null,
     };
 
-    // Detect if it's a movie detail page
-    const isMovieDetail = $(".mv-content").length > 0 || $("div.mv-content").length > 0;
-
-    // 🎬 Movie detail page scraping
-    if (isMovieDetail) {
-      const movie = {};
-      const poster = $(".mv-content img").attr("src");
-      const imgFull = poster?.startsWith("http")
+    // Detect main poster (usually inside .albumcover img)
+    const poster = $(".albumcover img").attr("src") || $("img").first().attr("src");
+    if (poster) {
+      metadata.poster = poster.startsWith("http")
         ? poster
         : `${baseURL}${poster}`;
-
-      metadata.poster = imgFull;
-
-      // Extract movie details from <ul> under .mv-content
-      const ul = $(".mv-content ul li");
-      ul.each((i, el) => {
-        const text = $(el).text().trim();
-
-        if (text.toLowerCase().includes("file size")) {
-          movie.size = text.replace("File Size:", "").trim();
-        } else if (text.toLowerCase().includes("download format")) {
-          movie.format = text.replace("Download Format:", "").trim();
-        } else if (text.toLowerCase().includes(".mp4")) {
-          movie.name = text;
-        }
-      });
-
-      // Extract download link
-      const dlLink = $(".mv-content a").attr("href");
-      if (dlLink)
-        movie.downloadUrl = dlLink.startsWith("http")
-          ? dlLink
-          : `${baseURL}${dlLink}`;
-
-      // Extract page tags / related search
-      const tags = [];
-      $(".incoming-search-terms li").each((i, el) => {
-        tags.push($(el).text().trim());
-      });
-
-      // ✅ Send detail page data
-      return res.status(200).json({
-        source: targetURL,
-        metadata,
-        movie,
-        tags,
-      });
     }
 
-    // 🎞️ Else: it's a listing page (fallback)
-    const results = [];
-    $("div.f").each((i, el) => {
-      const title = $(el).find("a").text().trim();
-      const href = $(el).find("a").attr("href");
-      const img = $(el).find("img").attr("src");
-      if (href && title && !title.toLowerCase().includes("movies")) {
-        results.push({
-          title,
-          url: href.startsWith("http") ? href : `${baseURL}${href}`,
-          img: img ? `${baseURL}${img}` : null,
+    // 🎬 Movie information
+    const movie = {};
+    $("div.details").each((i, el) => {
+      const text = $(el).text().trim();
+      if (text.includes("File Name:"))
+        movie.name = text.replace("File Name:", "").trim();
+      else if (text.includes("File Size:"))
+        movie.size = text.replace("File Size:", "").trim();
+      else if (text.includes("Duration:"))
+        movie.duration = text.replace("Duration:", "").trim();
+      else if (text.includes("Video Resolution:"))
+        movie.resolution = text.replace("Video Resolution:", "").trim();
+      else if (text.includes("Download Format:"))
+        movie.format = text.replace("Download Format:", "").trim();
+      else if (text.includes("Added On:"))
+        movie.addedOn = text.replace("Added On:", "").trim();
+    });
+
+    // ✅ Extract download server links
+    const downloads = [];
+    $(".download .dlink a").each((i, el) => {
+      const title = $(el).text().trim();
+      const href = $(el).attr("href");
+      if (href) {
+        const absUrl = href.startsWith("http") ? href : `${baseURL}${href}`;
+        downloads.push({
+          server: title,
+          url: absUrl,
         });
       }
     });
 
-    const pagination = {
-      currentPage: $("#currentPage").text().trim() || null,
-      totalPages: $("#totalPages").text().trim() || null,
-    };
+    // ✅ Tags (from .Tag or incoming-search-terms)
+    const tags = [];
+    $(".incoming-search-terms li").each((i, el) =>
+      tags.push($(el).text().trim())
+    );
+    if (tags.length === 0) {
+      $(".Tag .green")
+        .text()
+        .split(/[.,]/)
+        .forEach((t) => {
+          if (t.trim()) tags.push(t.trim());
+        });
+    }
 
+    // ✅ Final Response
     res.status(200).json({
       source: targetURL,
       metadata,
-      pagination,
-      total: results.length,
-      results,
+      movie,
+      downloads,
+      tags,
     });
   } catch (err) {
     res.status(500).json({
