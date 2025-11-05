@@ -2,7 +2,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  // ✅ CORS headers
+  // ✅ Allow all origins
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -26,7 +26,27 @@ export default async function handler(req, res) {
     const $ = cheerio.load(html);
     const results = [];
 
-    // Case 1️⃣: Movie list (div.f)
+    // Movie metadata object
+    const metadata = {
+      title: $("title").first().text().trim() || null,
+      description:
+        $('meta[name="description"]').attr("content") ||
+        $("p").first().text().trim() ||
+        null,
+      keywords: $('meta[name="keywords"]').attr("content") || null,
+      date:
+        $("div.details:contains('Added On')").text().replace("Added On:", "").trim() ||
+        $("time").first().text().trim() ||
+        null,
+      image:
+        $("img").first().attr("src") && $("img").first().attr("src").startsWith("http")
+          ? $("img").first().attr("src")
+          : $("img").first().attr("src")
+          ? `https://moviesda14.com${$("img").first().attr("src")}`
+          : null,
+    };
+
+    // Case 1️⃣: Movie list page (div.f)
     if ($("div.f").length > 0) {
       $("div.f").each((i, el) => {
         const title = $(el).find("a").text().trim();
@@ -36,7 +56,9 @@ export default async function handler(req, res) {
         if (title && href) {
           results.push({
             title,
-            url: href.startsWith("http") ? href : `https://moviesda14.com${href}`,
+            url: href.startsWith("http")
+              ? href
+              : `https://moviesda14.com${href}`,
             img: imgSrc
               ? imgSrc.startsWith("http")
                 ? imgSrc
@@ -47,62 +69,84 @@ export default async function handler(req, res) {
       });
     }
 
-    // Case 2️⃣: Movie download info page (div.bf .download)
-    else if ($("div.bf").length > 0 && $("div.download a").length > 0) {
-      const poster =
-        $("div.albumcover img").attr("src") &&
-        ($("div.albumcover img").attr("src").startsWith("http")
-          ? $("div.albumcover img").attr("src")
-          : `https://moviesda14.com${$("div.albumcover img").attr("src")}`);
+    // Case 2️⃣: Movie download info or final file page
+    else if ($("div.bf").length > 0) {
+      const poster = $("div.albumcover img").attr("src");
+      const absolutePoster = poster
+        ? poster.startsWith("http")
+          ? poster
+          : `https://moviesda14.com${poster}`
+        : null;
 
+      // Extract "File Name" and "File Size" lines
+      const fileDetails = {};
+      $("div.details").each((i, el) => {
+        const text = $(el).text().trim();
+        if (text.includes("File Name")) fileDetails.fileName = text.replace("File Name:", "").trim();
+        if (text.includes("File Size")) fileDetails.fileSize = text.replace("File Size:", "").trim();
+        if (text.includes("Duration")) fileDetails.duration = text.replace("Duration:", "").trim();
+        if (text.includes("Video Resolution"))
+          fileDetails.resolution = text.replace("Video Resolution:", "").trim();
+      });
+
+      // Extract all download and watch links
       $("div.download a").each((i, el) => {
         const title = $(el).text().trim();
         const href = $(el).attr("href");
-        if (href) {
+
+        // Skip social/share links
+        if (
+          href &&
+          !href.includes("facebook") &&
+          !href.includes("twitter") &&
+          !href.includes("whatsapp")
+        ) {
           results.push({
             title,
             url: href.startsWith("http")
               ? href
               : `https://moviesda14.com${href}`,
-            img: poster || null,
+            img: absolutePoster,
           });
         }
       });
+
+      // Include metadata info
+      if (Object.keys(fileDetails).length > 0) {
+        results.push({
+          title: fileDetails.fileName || metadata.title,
+          description: metadata.description,
+          date: metadata.date,
+          fileSize: fileDetails.fileSize,
+          duration: fileDetails.duration,
+          resolution: fileDetails.resolution,
+          poster: absolutePoster,
+        });
+      }
     }
 
-    // Case 3️⃣: Final CDN or external watch page (with direct download/stream links)
-    else if ($("a[href]").length > 0) {
-      $("a[href]").each((i, el) => {
+    // Case 3️⃣: Fallback for simple <a> based page
+    else {
+      $("a").each((i, el) => {
+        const title = $(el).text().trim();
         const href = $(el).attr("href");
-        const text = $(el).text().trim() || "External Link";
+
         if (
           href &&
-          (href.includes("http") ||
-            href.includes("cdn.") ||
-            href.includes("stream") ||
-            href.includes("download"))
+          !href.includes("facebook") &&
+          !href.includes("twitter") &&
+          !href.includes("whatsapp") &&
+          title.length > 2
         ) {
-          results.push({
-            title: text,
-            url: href,
-          });
+          results.push({ title, url: href });
         }
       });
     }
 
-    // Fallback: No results, just return the raw HTML for debugging
-    if (results.length === 0) {
-      res.status(200).json({
-        source: targetURL,
-        total: 0,
-        message: "No matches found. Check structure.",
-        raw: html.substring(0, 3000) + "... [trimmed]",
-      });
-      return;
-    }
-
+    // Return metadata and results
     res.status(200).json({
       source: targetURL,
+      metadata,
       total: results.length,
       results,
     });
