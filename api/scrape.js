@@ -13,7 +13,7 @@ export default async function handler(req, res) {
 
   const baseURL = "https://moviesda14.com";
 
-  // 🔹 Helper: fetch HTML
+  // 🔹 Fetch HTML safely
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
@@ -25,25 +25,21 @@ export default async function handler(req, res) {
     return data;
   }
 
-  // 🔹 Extract final CDN .mp4 from deep page (download.moviespage.site)
+  // 🔹 Extract final CDN .mp4 from deep download page
   async function getFinalCdnUrl(pageUrl) {
     try {
       const html = await fetchHtml(pageUrl);
 
-      // 1️⃣ Direct .mp4 link
       const mp4Match = html.match(/https?:\/\/[^\s"']+\.mp4/);
       if (mp4Match) return mp4Match[0];
 
-      // 2️⃣ iframe src
       const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
       if (iframeMatch && iframeMatch[1].includes(".mp4")) return iframeMatch[1];
 
-      // 3️⃣ meta refresh redirect
       const metaMatch = html.match(/<meta[^>]+url=([^"'>]+)/i);
       if (metaMatch && metaMatch[1]) return metaMatch[1];
 
-      // 4️⃣ CDN domains (like uptodl, akamai, etc.)
-      const cdnMatch = html.match(/https?:\/\/[^\s"']*(cdn|uptodl|dood|aws)[^\s"']+/i);
+      const cdnMatch = html.match(/https?:\/\/[^\s"']*(hotshare|cdn|uptodl|aws|dood)[^\s"']+\.mp4/i);
       if (cdnMatch) return cdnMatch[0];
 
       return null;
@@ -52,63 +48,56 @@ export default async function handler(req, res) {
     }
   }
 
-  // 🔹 Extract all details from download.moviespage.site pages
+  // 🔹 Extract details from download.moviespage.site
   async function extractDownloadPageData(downloadPageUrl) {
     try {
       const html = await fetchHtml(downloadPageUrl);
       const $ = cheerio.load(html);
 
-      const fileDetails = {
-        title: $("title").text().trim() || null,
-        img: $(".albumcover img").attr("src") || null,
-        fileName: $(".details:contains('File Name')").text().replace("File Name:", "").trim() || null,
-        size: $(".details:contains('File Size')").text().replace("File Size:", "").trim() || null,
-        videoSize: $(".details:contains('Video Size')").text().replace("Video Size:", "").trim() || null,
-        format: $(".details:contains('Format')").text().replace("Format:", "").trim() || null,
-        duration: $(".details:contains('Duration')").text().replace("Duration:", "").trim() || null,
-        addedOn: $(".details:contains('Added On')").text().replace("Added On:", "").trim() || null,
+      const file = {
+        title: $("title").text().trim(),
+        img: $(".albumcover img").attr("src"),
+        fileName: $(".details:contains('File Name')").text().replace("File Name:", "").trim(),
+        size: $(".details:contains('File Size')").text().replace("File Size:", "").trim(),
+        videoSize: $(".details:contains('Video Size')").text().replace("Video Size:", "").trim(),
+        format: $(".details:contains('Format')").text().replace("Format:", "").trim(),
+        duration: $(".details:contains('Duration')").text().replace("Duration:", "").trim(),
+        addedOn: $(".details:contains('Added On')").text().replace("Added On:", "").trim(),
+        description: $(".Tag font").text().trim() || $("meta[name='description']").attr("content") || null,
         servers: [],
-        cdnLinks: [],
+        cdnLinks: []
       };
 
-      if (fileDetails.img && fileDetails.img.startsWith("/")) {
-        fileDetails.img = `${baseURL}${fileDetails.img}`;
+      if (file.img && file.img.startsWith("/")) {
+        file.img = `${baseURL}${file.img}`;
       }
 
       $(".download .dlink a").each((_, el) => {
-        const name = $(el).text().trim();
         const href = $(el).attr("href");
         if (href) {
-          fileDetails.servers.push({
-            name,
-            url: href.startsWith("http") ? href : `${baseURL}${href}`,
-          });
+          file.servers.push(href.startsWith("http") ? href : `${baseURL}${href}`);
         }
       });
 
-      // Now go one level deeper — inside server links
-      for (const server of fileDetails.servers) {
-        const cdn = await getFinalCdnUrl(server.url);
-        if (cdn) {
-          fileDetails.cdnLinks.push({
-            from: server.name,
-            cdnUrl: cdn,
-          });
+      // Fetch actual .mp4 links from each server
+      for (const s of file.servers) {
+        const cdn = await getFinalCdnUrl(s);
+        if (cdn && !file.cdnLinks.includes(cdn)) {
+          file.cdnLinks.push(cdn);
         }
       }
 
-      return fileDetails;
+      return file;
     } catch (err) {
-      console.log("❌ Error in extractDownloadPageData:", err.message);
+      console.log("❌ Error parsing download page:", err.message);
       return null;
     }
   }
 
-  // 🔹 Extract movies + download pages
+  // 🔹 Extract movies, then follow to download pages
   async function extractMovieData(movieUrl) {
     const html = await fetchHtml(movieUrl);
     const $ = cheerio.load(html);
-
     const results = [];
 
     $("div.f").each((_, el) => {
@@ -124,63 +113,79 @@ export default async function handler(req, res) {
       }
     });
 
+    const output = [];
+
     for (let i = 0; i < results.length; i++) {
       const movie = results[i];
+      const quality = movie.title.match(/\((.*?)\)/)?.[1] || "Unknown";
+
       try {
         const subHtml = await fetchHtml(movie.url);
         const $$ = cheerio.load(subHtml);
-
         const dlLink = $$("a[href*='/download/']").first().attr("href");
-        if (dlLink) {
-          const absDL = dlLink.startsWith("http")
-            ? dlLink
-            : `${baseURL}${dlLink}`;
-          movie.downloadPage = absDL;
 
-          const dlHtml = await fetchHtml(absDL);
-          const $$$ = cheerio.load(dlHtml);
+        if (!dlLink) continue;
 
-          const servers = $$$(".download .dlink a")
-            .map((_, el) => $$$($(el)).attr("href"))
-            .get()
-            .map((u) => (u.startsWith("http") ? u : `${baseURL}${u}`));
+        const absDL = dlLink.startsWith("http") ? dlLink : `${baseURL}${dlLink}`;
+        const dlHtml = await fetchHtml(absDL);
+        const $$$ = cheerio.load(dlHtml);
 
-          movie.servers = servers;
-          movie.final = [];
+        const servers = $$$(".download .dlink a")
+          .map((_, el) => $$$($(el)).attr("href"))
+          .get()
+          .map((u) => (u.startsWith("http") ? u : `${baseURL}${u}`));
 
-          for (const serverUrl of servers) {
-            const fileDetails = await extractDownloadPageData(serverUrl);
-            if (fileDetails) movie.final.push(fileDetails);
+        const cdnUrls = [];
+        let finalFile = null;
+
+        for (const s of servers) {
+          const f = await extractDownloadPageData(s);
+          if (f) {
+            finalFile = f;
+            for (const c of f.cdnLinks) {
+              if (!cdnUrls.includes(c)) cdnUrls.push(c);
+            }
           }
         }
+
+        if (finalFile) {
+          output.push({
+            quality,
+            size: finalFile.size,
+            duration: finalFile.duration,
+            format: finalFile.format,
+            addedOn: finalFile.addedOn,
+            description: finalFile.description,
+            cdn: cdnUrls.reduce((obj, link) => {
+              if (link.includes("1080")) obj["1080p"] = link;
+              else if (link.includes("720")) obj["720p"] = link;
+              else if (link.includes("360")) obj["360p"] = link;
+              else obj.other = link;
+              return obj;
+            }, {}),
+          });
+        }
       } catch (err) {
-        console.log("❌ Failed for:", movie.title, err.message);
+        console.log("❌ Failed at:", movie.title, err.message);
       }
     }
 
-    return { source: movieUrl, total: results.length, results };
+    const movieTitle = $("title").text().split(" ")[0] || "Movie";
+    return { movie: movieTitle, results: output };
   }
 
   try {
-    // 🌐 Start scraping
-    const html = await fetchHtml(decodeURIComponent(url));
-    const $ = cheerio.load(html);
+    const pageHtml = await fetchHtml(decodeURIComponent(url));
+    const $ = cheerio.load(pageHtml);
     const links = [];
 
     $("div.f").each((_, el) => {
-      const title = $(el).find("a").text().trim();
       const href = $(el).find("a").attr("href");
-      if (href && title) {
-        links.push({
-          title,
-          url: href.startsWith("http") ? href : `${baseURL}${href}`,
-        });
-      }
+      if (href) links.push(href.startsWith("http") ? href : `${baseURL}${href}`);
     });
 
-    // Automatically follow "original movie" page
-    if (links.length === 1 && links[0].url.includes("-original-")) {
-      const result = await extractMovieData(links[0].url);
+    if (links.length === 1 && links[0].includes("-original-")) {
+      const result = await extractMovieData(links[0]);
       return res.status(200).json(result);
     }
 
@@ -190,9 +195,9 @@ export default async function handler(req, res) {
     }
 
     res.status(200).json({
-      source: decodeURIComponent(url),
-      total: links.length,
-      results: links,
+      error: "No original movie found",
+      url: decodeURIComponent(url),
+      possibleLinks: links,
     });
   } catch (err) {
     res.status(500).json({
