@@ -12,132 +12,163 @@ export default async function handler(req, res) {
   if (!url) return res.status(400).json({ error: "Missing ?url parameter" });
 
   const baseURL = "https://moviesda14.com";
-  const targetURL = decodeURIComponent(url);
 
-  // 🧩 Helper: Fetch page safely
+  // 🧩 Helper: fetch HTML safely
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
       },
-      timeout: 10000,
+      timeout: 15000,
     });
     return data;
   }
 
-  // 🧩 Helper: Extract file download data
-  async function extractFilePage(downloadPageUrl) {
+  // 🧩 Extract file info from final download.page
+  async function extractDownloadPageData(downloadPageUrl) {
     try {
       const html = await fetchHtml(downloadPageUrl);
       const $ = cheerio.load(html);
 
       const fileDetails = {
-        title:
-          $("title").text().trim() ||
-          $('meta[property="og:title"]').attr("content") ||
-          null,
-        description:
-          $('meta[name="description"]').attr("content") ||
-          $('meta[property="og:description"]').attr("content") ||
-          null,
-        poster:
-          $("img").first().attr("src") &&
-          ($("img").first().attr("src").startsWith("http")
-            ? $("img").first().attr("src")
-            : `${new URL(downloadPageUrl).origin}${$("img").first().attr("src")}`),
-        file: {
-          name: $("div.details:contains('File Name')").text().replace("File Name:", "").trim(),
-          size: $("div.details:contains('File Size')").text().replace("File Size:", "").trim(),
-          duration: $("div.details:contains('Duration')").text().replace("Duration:", "").trim(),
-          resolution: $("div.details:contains('Video Resolution')").text().replace("Video Resolution:", "").trim(),
-          format: $("div.details:contains('Format')").text().replace("Format:", "").trim(),
-          date: $("div.details:contains('Added On')").text().replace("Added On:", "").trim(),
-        },
+        title: $("title").text().trim() || null,
+        img: $(".albumcover img").attr("src") || null,
+        fileName: $(".details:contains('File Name')").text().replace("File Name:", "").trim() || null,
+        size: $(".details:contains('File Size')").text().replace("File Size:", "").trim() || null,
+        videoSize: $(".details:contains('Video Size')").text().replace("Video Size:", "").trim() || null,
+        format: $(".details:contains('Format')").text().replace("Format:", "").trim() || null,
+        duration: $(".details:contains('Duration')").text().replace("Duration:", "").trim() || null,
+        addedOn: $(".details:contains('Added On')").text().replace("Added On:", "").trim() || null,
         servers: [],
       };
 
+      // Normalize image URL
+      if (fileDetails.img && fileDetails.img.startsWith("/")) {
+        fileDetails.img = `${baseURL}${fileDetails.img}`;
+      }
+
+      // Extract server links
       $(".download .dlink a").each((_, el) => {
         const name = $(el).text().trim();
         const href = $(el).attr("href");
         if (href) {
-          const full = href.startsWith("http")
-            ? href
-            : `${new URL(downloadPageUrl).origin}${href}`;
-          fileDetails.servers.push({ server: name, url: full });
+          fileDetails.servers.push({
+            name,
+            url: href.startsWith("http") ? href : `${baseURL}${href}`,
+          });
         }
       });
 
       return fileDetails;
-    } catch {
+    } catch (err) {
+      console.log("❌ Error in extractDownloadPageData:", err.message);
       return null;
     }
   }
 
-  try {
-    // 1️⃣ Step: Fetch the given movie page
-    const html = await fetchHtml(targetURL);
+  // 🧩 Extract nested pages and final links
+  async function extractMovieData(movieUrl) {
+    const html = await fetchHtml(movieUrl);
     const $ = cheerio.load(html);
 
-    // Extract poster and meta
-    const metadata = {
-      title:
-        $("title").text().trim() ||
-        $('meta[property="og:title"]').attr("content") ||
-        null,
-      description:
-        $('meta[name="description"]').attr("content") ||
-        $('meta[property="og:description"]').attr("content") ||
-        null,
-      image:
-        $('meta[property="og:image"]').attr("content") ||
-        $("img").first().attr("src") ||
-        null,
-    };
-    if (metadata.image && metadata.image.startsWith("/")) {
-      metadata.image = `${baseURL}${metadata.image}`;
-    }
+    const results = [];
 
-    // 2️⃣ Step: Find download page links (https://download.moviespage.site/download/page/xxxx)
-    const downloadLinks = [];
-    $("a[href*='download.moviespage.site/download/page/']").each((_, el) => {
-      const href = $(el).attr("href");
-      if (href && href.includes("download/page/")) {
-        const abs = href.startsWith("http")
-          ? href
-          : `${new URL(targetURL).origin}${href}`;
-        downloadLinks.push(abs);
+    // Collect submovie versions (e.g. 720p / 360p)
+    $("div.f").each((_, el) => {
+      const title = $(el).find("a").text().trim();
+      const href = $(el).find("a").attr("href");
+      const img = $(el).find("img").attr("src");
+      if (href && title) {
+        results.push({
+          title,
+          url: href.startsWith("http") ? href : `${baseURL}${href}`,
+          img: img ? `${baseURL}${img}` : null,
+        });
       }
     });
 
-    // 3️⃣ Step: Fetch and parse each download page
-    const allFiles = [];
-    for (const link of downloadLinks) {
-      const info = await extractFilePage(link);
-      if (info) allFiles.push(info);
+    // For each version, go to download page
+    for (let i = 0; i < results.length; i++) {
+      const movie = results[i];
+      try {
+        const subHtml = await fetchHtml(movie.url);
+        const $$ = cheerio.load(subHtml);
+
+        const dlLink = $$("a[href*='/download/']").first().attr("href");
+        if (dlLink) {
+          const absDL = dlLink.startsWith("http")
+            ? dlLink
+            : `${baseURL}${dlLink}`;
+          movie.downloadPage = absDL;
+
+          // Fetch download page
+          const dlHtml = await fetchHtml(absDL);
+          const $$$ = cheerio.load(dlHtml);
+
+          // Extract final servers (like https://download.moviespage.site/download/page/93206)
+          const servers = $$$(".download .dlink a")
+            .map((_, el) => $$$($(el)).attr("href"))
+            .get()
+            .map((u) => (u.startsWith("http") ? u : `${baseURL}${u}`));
+
+          movie.servers = servers;
+          movie.final = [];
+
+          // Step into each server page (download.moviespage.site)
+          for (const serverUrl of servers) {
+            const fileDetails = await extractDownloadPageData(serverUrl);
+            if (fileDetails) movie.final.push(fileDetails);
+          }
+        }
+      } catch (err) {
+        console.log("❌ Failed for:", movie.title, err.message);
+      }
     }
 
-    // 4️⃣ If no direct download links, return base info
-    if (allFiles.length === 0) {
-      return res.status(200).json({
-        source: targetURL,
-        metadata,
-        total: 0,
-        results: [],
-      });
+    return { source: movieUrl, total: results.length, results };
+  }
+
+  try {
+    // 🌐 Fetch initial page
+    const html = await fetchHtml(decodeURIComponent(url));
+    const $ = cheerio.load(html);
+    const links = [];
+
+    $("div.f").each((_, el) => {
+      const title = $(el).find("a").text().trim();
+      const href = $(el).find("a").attr("href");
+      if (href && title) {
+        links.push({
+          title,
+          url: href.startsWith("http") ? href : `${baseURL}${href}`,
+        });
+      }
+    });
+
+    // If only one link (e.g. “Original Movie”), go inside automatically
+    if (links.length === 1 && links[0].url.includes("-original-")) {
+      const result = await extractMovieData(links[0].url);
+      return res.status(200).json(result);
     }
 
-    // ✅ Final structured result
+    // If already an original movie page, go inside
+    if (url.includes("-original-")) {
+      const result = await extractMovieData(url);
+      return res.status(200).json(result);
+    }
+
+    // Otherwise, return the first level list
     res.status(200).json({
-      source: targetURL,
-      total: allFiles.length,
-      results: allFiles,
+      source: decodeURIComponent(url),
+      total: links.length,
+      results: links,
     });
   } catch (err) {
     res.status(500).json({
-      error: "Failed to scrape",
+      error: "Failed to scrape page",
       details: err.message,
-      source: targetURL,
+      source: decodeURIComponent(url),
     });
   }
 }
