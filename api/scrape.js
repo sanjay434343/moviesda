@@ -2,23 +2,23 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  // ✅ CORS
+  // ✅ Allow all origins
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  // 🧠 Dynamic Parameters
-  const { url, lang = "tamil", year = "2021" } = req.query;
+  const { url, lang, year, search, date } = req.query;
 
-  // Construct dynamic Moviesda URL
   const baseURL = "https://moviesda14.com";
+  const language = lang || search || "tamil";
+  const yearOrDate = year || date || "2021";
+
   const targetURL = url
     ? decodeURIComponent(url)
-    : `${baseURL}/${lang}-${year}-movies/`;
+    : `${baseURL}/${language}-${yearOrDate}-movies/`;
 
   try {
-    // 🧩 Fetch HTML
     const { data: html } = await axios.get(targetURL, {
       headers: {
         "User-Agent":
@@ -29,49 +29,72 @@ export default async function handler(req, res) {
     const $ = cheerio.load(html);
     const results = [];
 
-    // 🎬 Metadata
+    // 🧠 Metadata
     const metadata = {
-      title: $("title").text().trim() || null,
+      title:
+        $("title").text().trim() ||
+        $('meta[property="og:title"]').attr("content") ||
+        null,
       description:
         $('meta[name="description"]').attr("content") ||
+        $('meta[property="og:description"]').attr("content") ||
         $("p").first().text().trim() ||
         null,
-      image: $("img").first().attr("src")
-        ? $("img").first().attr("src").startsWith("http")
+      image:
+        $("img").first().attr("src") &&
+        ($("img").first().attr("src").startsWith("http")
           ? $("img").first().attr("src")
-          : `${baseURL}${$("img").first().attr("src")}`
-        : null,
+          : `${baseURL}${$("img").first().attr("src")}`),
     };
 
-    // 🎯 Extract actual movie entries (usually in <div class="f">)
+    // 🎯 Extract movies from multiple structures
+    // 1️⃣ div.f — standard listing
     $("div.f").each((i, el) => {
       const title = $(el).find("a").text().trim();
       const href = $(el).find("a").attr("href");
-      const imgSrc = $(el).find("img").attr("src");
+      const img = $(el).find("img").attr("src");
 
-      // Skip folders like "Tamil 2024 Movies"
-      if (
-        href &&
-        title &&
-        !title.toLowerCase().includes("movies") &&
-        !title.toLowerCase().includes("categories")
-      ) {
-        const movieUrl = href.startsWith("http") ? href : `${baseURL}${href}`;
-        const movieImg = imgSrc
-          ? imgSrc.startsWith("http")
-            ? imgSrc
-            : `${baseURL}${imgSrc}`
-          : metadata.image;
-
+      if (href && title && !title.toLowerCase().includes("movies")) {
         results.push({
           title,
-          url: movieUrl,
-          img: movieImg,
+          url: href.startsWith("http") ? href : `${baseURL}${href}`,
+          img: img
+            ? img.startsWith("http")
+              ? img
+              : `${baseURL}${img}`
+            : metadata.image,
         });
       }
     });
 
-    // 🎞 Return structured data
+    // 2️⃣ div.bf → movie block containers
+    if (results.length === 0) {
+      $("div.bf a").each((i, el) => {
+        const title = $(el).text().trim();
+        const href = $(el).attr("href");
+        if (href && title && href.includes("-movie")) {
+          results.push({
+            title,
+            url: href.startsWith("http") ? href : `${baseURL}${href}`,
+          });
+        }
+      });
+    }
+
+    // 3️⃣ fallback: any <a href="*-movie/">
+    if (results.length === 0) {
+      $("a[href*='-movie']").each((i, el) => {
+        const title = $(el).text().trim();
+        const href = $(el).attr("href");
+        if (href && title && href.includes("-movie")) {
+          results.push({
+            title,
+            url: href.startsWith("http") ? href : `${baseURL}${href}`,
+          });
+        }
+      });
+    }
+
     res.status(200).json({
       source: targetURL,
       metadata,
