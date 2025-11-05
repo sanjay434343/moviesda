@@ -9,12 +9,10 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const { url } = req.query;
-  const baseURL = "https://moviesda14.com";
-  if (!url) {
-    return res.status(400).json({ error: "Missing ?url parameter" });
-  }
+  if (!url) return res.status(400).json({ error: "Missing ?url parameter" });
 
-  // 🧩 Helper: Safe HTML fetcher
+  const baseURL = "https://moviesda14.com";
+
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
@@ -26,14 +24,35 @@ export default async function handler(req, res) {
     return data;
   }
 
-  try {
-    // 🌐 Step 1: Fetch the main movie page (e.g. chengalpattu-2025-tamil-movie)
-    const html = await fetchHtml(decodeURIComponent(url));
+  async function parseMovieList(targetURL) {
+    const html = await fetchHtml(targetURL);
     const $ = cheerio.load(html);
     const results = [];
 
-    // 🎬 Step 2: Get sub-movie links (720p, 360p, etc.)
-    $("div.f").each((i, el) => {
+    $("div.f").each((_, el) => {
+      const title = $(el).find("a").text().trim();
+      const href = $(el).find("a").attr("href");
+      const img = $(el).find("img").attr("src");
+      if (href && title) {
+        results.push({
+          title,
+          url: href.startsWith("http") ? href : `${baseURL}${href}`,
+          img: img ? `${baseURL}${img}` : null,
+        });
+      }
+    });
+
+    return results;
+  }
+
+  async function extractDownloadInfo(movieUrl) {
+    const html = await fetchHtml(movieUrl);
+    const $ = cheerio.load(html);
+
+    const title = $("title").text().trim();
+    const results = [];
+
+    $("div.f").each((_, el) => {
       const title = $(el).find("a").text().trim();
       const href = $(el).find("a").attr("href");
       const img = $(el).find("img").attr("src");
@@ -47,16 +66,13 @@ export default async function handler(req, res) {
       }
     });
 
-    // 🧩 Step 3: For each quality version, go inside and get the download page + servers
+    // Follow into download pages for each version
     for (let i = 0; i < results.length; i++) {
       const movie = results[i];
-
       try {
-        // Fetch subpage (e.g. 720p or 360p movie page)
         const subHtml = await fetchHtml(movie.url);
         const $$ = cheerio.load(subHtml);
 
-        // Find the main download page link
         const dlLink = $$("a[href*='/download/']").first().attr("href");
         if (dlLink) {
           const absDL = dlLink.startsWith("http")
@@ -64,7 +80,6 @@ export default async function handler(req, res) {
             : `${baseURL}${dlLink}`;
           movie.downloadPage = absDL;
 
-          // Step 4: Go into that download page and extract server URLs
           const dlHtml = await fetchHtml(absDL);
           const $$$ = cheerio.load(dlHtml);
 
@@ -77,20 +92,38 @@ export default async function handler(req, res) {
               );
             }
           });
-
           movie.servers = servers;
-          movie.final = []; // placeholder (no CDN crawl in this mode)
+          movie.final = [];
         }
       } catch (err) {
-        console.log("Failed to process:", movie.title, err.message);
+        console.log("❌ Failed:", movie.title, err.message);
       }
     }
 
-    // ✅ Return clean structured data
+    return { source: movieUrl, total: results.length, results };
+  }
+
+  try {
+    let currentUrl = decodeURIComponent(url);
+    let list = await parseMovieList(currentUrl);
+
+    // 🔁 If there’s only 1 result (like “Original Movie”), auto-follow it
+    if (list.length === 1 && list[0].url.includes("-original-")) {
+      currentUrl = list[0].url;
+      list = await parseMovieList(currentUrl);
+    }
+
+    // If still not found (i.e. we are at “original-movie”), go deep
+    if (list.length === 0 || currentUrl.includes("-original-movie")) {
+      const result = await extractDownloadInfo(currentUrl);
+      return res.status(200).json(result);
+    }
+
+    // Otherwise, normal list
     res.status(200).json({
-      source: decodeURIComponent(url),
-      total: results.length,
-      results,
+      source: currentUrl,
+      total: list.length,
+      results: list,
     });
   } catch (err) {
     res.status(500).json({
