@@ -12,7 +12,7 @@ export default async function handler(req, res) {
 
   const baseURL = "https://moviesda14.com";
 
-  // 🧠 Fetch HTML helper
+  // Fetch HTML safely
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
     return data;
   }
 
-  // 🎞 Extract info from download page
+  // Extract data from final download page
   async function extractDownloadPageData(downloadPageUrl) {
     try {
       const html = await fetchHtml(downloadPageUrl);
@@ -41,22 +41,41 @@ export default async function handler(req, res) {
         duration: $(".details:contains('Duration')").text().replace("Duration:", "").trim(),
         addedOn: $(".details:contains('Added On')").text().replace("Added On:", "").trim(),
         cdn: [],
+        watchOnline: []
       };
 
       if (fileDetails.img && fileDetails.img.startsWith("/")) {
         fileDetails.img = `${baseURL}${fileDetails.img}`;
       }
 
-      // 🔥 Directly extract .mp4 CDN links
+      // Extract direct mp4 CDN links
       $(".download .dlink a").each((_, el) => {
         const href = $(el).attr("href");
-        if (href && href.endsWith(".mp4")) {
-          fileDetails.cdn.push(href);
+        if (!href) return;
+
+        // Match direct CDN or hotshare links
+        if (href.match(/(hotshare|dl\d+|cdn|download)/i)) {
+          if (href.endsWith(".mp4") || href.includes(".mp4")) {
+            fileDetails.cdn.push(href.trim());
+          }
+        }
+
+        // Capture watch online links
+        if (href.includes("onestream.watch")) {
+          fileDetails.watchOnline.push(href.trim());
         }
       });
 
-      // Deduplicate same links
-      fileDetails.cdn = [...new Set(fileDetails.cdn)];
+      // If still missing, try regex on HTML (backup mode)
+      const cdnRegex = /https?:\/\/[a-zA-Z0-9./\-_]+(?:hotshare|dl\d+|cdn|moviespage)[^"'\s]+\.mp4/g;
+      const found = html.match(cdnRegex);
+      if (found && found.length) {
+        fileDetails.cdn.push(...found);
+      }
+
+      // Deduplicate and sanitize
+      fileDetails.cdn = [...new Set(fileDetails.cdn.map(l => l.trim()))];
+      fileDetails.watchOnline = [...new Set(fileDetails.watchOnline.map(l => l.trim()))];
 
       return fileDetails;
     } catch (err) {
@@ -65,7 +84,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // 🎬 Extract movie info & qualities
+  // Extract full movie data
   async function extractMovieData(movieUrl) {
     const html = await fetchHtml(movieUrl);
     const $ = cheerio.load(html);
@@ -78,9 +97,7 @@ export default async function handler(req, res) {
       $('meta[property="og:image"]').attr("content") ||
       $('meta[name="og:image"]').attr("content") ||
       null;
-    if (poster && poster.startsWith("/")) {
-      poster = `${baseURL}${poster}`;
-    }
+    if (poster && poster.startsWith("/")) poster = `${baseURL}${poster}`;
 
     const versions = [];
     $("div.f").each((_, el) => {
@@ -103,7 +120,6 @@ export default async function handler(req, res) {
         const dlLink = $$("a[href*='/download/']").first().attr("href");
         if (!dlLink) continue;
         const absDL = dlLink.startsWith("http") ? dlLink : `${baseURL}${dlLink}`;
-
         const fileData = await extractDownloadPageData(absDL);
         if (!fileData) continue;
 
@@ -117,13 +133,14 @@ export default async function handler(req, res) {
             : "unknown";
 
         results[quality] = {
-          size: fileData.size,
-          duration: fileData.duration,
-          format: fileData.format,
-          addedOn: fileData.addedOn,
-          videoSize: fileData.videoSize,
-          cdn: fileData.cdn.length ? fileData.cdn[0] : null,
-          cdnAll: fileData.cdn, // includes all available .mp4 links
+          size: fileData.size || "",
+          duration: fileData.duration || "",
+          format: fileData.format || "",
+          addedOn: fileData.addedOn || "",
+          videoSize: fileData.videoSize || "",
+          cdn: fileData.cdn[0] || null,
+          cdnAll: fileData.cdn || [],
+          watchOnline: fileData.watchOnline || []
         };
       } catch (err) {
         console.log("⚠️ Failed:", version.title, err.message);
@@ -132,7 +149,7 @@ export default async function handler(req, res) {
 
     return {
       movie: movieName,
-      image: poster,
+      image: poster || `${baseURL}/img/dir.gif`,
       description: `${movieName} Tamil Movie HD Download`,
       results,
     };
