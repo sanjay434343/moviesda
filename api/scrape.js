@@ -8,21 +8,66 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const { url } = req.query;
-  const baseURL = "https://moviesda14.com";
-  const targetURL = url ? decodeURIComponent(url) : `${baseURL}/`;
+  const { url, lang, year, search, date, follow = "true" } = req.query;
+  const shouldFollow = String(follow).toLowerCase() !== "false";
 
-  try {
-    const { data: html } = await axios.get(targetURL, {
+  const baseURL = "https://moviesda14.com";
+  const language = lang || search || "tamil";
+  const yearOrDate = year || date || "2025";
+
+  const targetURL = url
+    ? decodeURIComponent(url)
+    : `${baseURL}/${language}-${yearOrDate}-movies/`;
+
+  // 🧩 Helper function: fetch HTML
+  async function fetchHtml(u) {
+    const { data } = await axios.get(u, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
       },
+      timeout: 10000,
     });
+    return data;
+  }
 
+  // 🧩 Extract poster image from a movie page
+  function extractPosterFromHtml(html, pageUrl) {
     const $ = cheerio.load(html);
+    const candidates = [
+      $('meta[property="og:image"]').attr("content"),
+      $('meta[name="og:image"]').attr("content"),
+      $("picture source[type='image/webp']").attr("srcset"),
+      $("picture source[type='image/jpeg']").attr("srcset"),
+      $("picture img").attr("src"),
+      $(".movie-info-container img").attr("src"),
+      $("img.wp-post-image").attr("src"),
+      $("img").first().attr("src"),
+    ];
 
-    // ✅ Metadata
+    for (const c of candidates) {
+      if (c && c.length > 5) {
+        if (c.startsWith("http")) return c;
+        if (c.startsWith("//")) return `https:${c}`;
+        if (c.startsWith("/")) return `${new URL(pageUrl).origin}${c}`;
+        if (c.includes(",")) {
+          const first = c.split(",")[0].trim().split(" ")[0];
+          if (first.startsWith("http")) return first;
+          if (first.startsWith("/")) return `${new URL(pageUrl).origin}${first}`;
+        }
+        return c;
+      }
+    }
+    return null;
+  }
+
+  try {
+    // 🌐 Fetch listing page
+    const html = await fetchHtml(targetURL);
+    const $ = cheerio.load(html);
+    const results = [];
+
+    // 🎬 Metadata
     const metadata = {
       title:
         $("title").text().trim() ||
@@ -31,71 +76,80 @@ export default async function handler(req, res) {
       description:
         $('meta[name="description"]').attr("content") ||
         $('meta[property="og:description"]').attr("content") ||
+        $("p").first().text().trim() ||
         null,
-      poster: null,
+      image:
+        $('meta[property="og:image"]').attr("content") ||
+        $("img").first().attr("src") ||
+        null,
     };
 
-    // Detect main poster (usually inside .albumcover img)
-    const poster = $(".albumcover img").attr("src") || $("img").first().attr("src");
-    if (poster) {
-      metadata.poster = poster.startsWith("http")
-        ? poster
-        : `${baseURL}${poster}`;
+    if (metadata.image && metadata.image.startsWith("/")) {
+      metadata.image = `${new URL(targetURL).origin}${metadata.image}`;
     }
 
-    // 🎬 Movie information
-    const movie = {};
-    $("div.details").each((i, el) => {
-      const text = $(el).text().trim();
-      if (text.includes("File Name:"))
-        movie.name = text.replace("File Name:", "").trim();
-      else if (text.includes("File Size:"))
-        movie.size = text.replace("File Size:", "").trim();
-      else if (text.includes("Duration:"))
-        movie.duration = text.replace("Duration:", "").trim();
-      else if (text.includes("Video Resolution:"))
-        movie.resolution = text.replace("Video Resolution:", "").trim();
-      else if (text.includes("Download Format:"))
-        movie.format = text.replace("Download Format:", "").trim();
-      else if (text.includes("Added On:"))
-        movie.addedOn = text.replace("Added On:", "").trim();
-    });
+    // 🎥 Extract movies from div.f
+    $("div.f").each((i, el) => {
+      const title = $(el).find("a").text().trim();
+      const href = $(el).find("a").attr("href");
+      const img = $(el).find("img").attr("src");
 
-    // ✅ Extract download server links
-    const downloads = [];
-    $(".download .dlink a").each((i, el) => {
-      const title = $(el).text().trim();
-      const href = $(el).attr("href");
-      if (href) {
-        const absUrl = href.startsWith("http") ? href : `${baseURL}${href}`;
-        downloads.push({
-          server: title,
-          url: absUrl,
+      if (href && title && !title.toLowerCase().includes("movies")) {
+        const fullUrl = href.startsWith("http") ? href : `${baseURL}${href}`;
+        const image = img
+          ? img.startsWith("http")
+            ? img
+            : `${baseURL}${img}`
+          : metadata.image;
+
+        results.push({
+          title,
+          url: fullUrl,
+          img: image,
         });
       }
     });
 
-    // ✅ Tags (from .Tag or incoming-search-terms)
-    const tags = [];
-    $(".incoming-search-terms li").each((i, el) =>
-      tags.push($(el).text().trim())
-    );
-    if (tags.length === 0) {
-      $(".Tag .green")
-        .text()
-        .split(/[.,]/)
-        .forEach((t) => {
-          if (t.trim()) tags.push(t.trim());
-        });
+    // 🔁 If .f empty, fallback to <a href="*-movie/">
+    if (results.length === 0) {
+      $("a[href*='-movie']").each((i, el) => {
+        const title = $(el).text().trim();
+        const href = $(el).attr("href");
+        if (href && title) {
+          const fullUrl = href.startsWith("http") ? href : `${baseURL}${href}`;
+          results.push({ title, url: fullUrl, img: metadata.image });
+        }
+      });
     }
 
-    // ✅ Final Response
+    // 📄 Pagination (only minimal info)
+    const currentPage = $("#currentPage").text().trim() || null;
+    const totalPages = $("#totalPages").text().trim() || null;
+
+    // 🎞 If enabled, follow each movie link to get real poster
+    if (shouldFollow && results.length > 0) {
+      for (let i = 0; i < results.length; i++) {
+        const item = results[i];
+        try {
+          const movieHtml = await fetchHtml(item.url);
+          const poster = extractPosterFromHtml(movieHtml, item.url);
+          if (poster) item.img = poster;
+        } catch {
+          // skip failed pages silently
+        }
+      }
+    }
+
+    // ✅ Send clean response
     res.status(200).json({
       source: targetURL,
       metadata,
-      movie,
-      downloads,
-      tags,
+      pagination: {
+        currentPage,
+        totalPages,
+      },
+      total: results.length,
+      results,
     });
   } catch (err) {
     res.status(500).json({
