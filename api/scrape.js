@@ -2,7 +2,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  // ✅ Allow all origins (CORS)
+  // ✅ Allow all origins
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -11,14 +11,16 @@ export default async function handler(req, res) {
 
   const { url, lang, year } = req.query;
 
-  // 🎯 If URL is passed, use it. Otherwise, construct using lang + year
+  // ✅ Construct dynamic target URL
   let targetURL;
   if (url) {
     targetURL = decodeURIComponent(url);
   } else if (lang && year) {
     targetURL = `https://moviesda14.com/${lang}-${year}-movies/`;
   } else {
-    targetURL = "https://moviesda14.com/tamil-2021-movies/";
+    return res.status(400).json({
+      error: "Missing parameters. Please provide either ?url= or ?lang= & ?year=",
+    });
   }
 
   try {
@@ -48,56 +50,57 @@ export default async function handler(req, res) {
         $('meta[property="og:image"]').attr("content") ||
         $("img").first().attr("src") ||
         null,
-      date:
-        $("div.details:contains('Added On')").text().replace("Added On:", "").trim() ||
-        $("time").first().text().trim() ||
-        null,
-      size:
-        $("div.details:contains('File Size')").text().replace("File Size:", "").trim() ||
-        null,
-      duration:
-        $("div.details:contains('Duration')").text().replace("Duration:", "").trim() ||
-        null,
-      resolution:
-        $("div.details:contains('Resolution')").text().replace("Resolution:", "").trim() ||
-        $("div.details:contains('Video Resolution')").text().replace("Video Resolution:", "").trim() ||
-        null,
     };
 
-    // ✅ Normalize relative image URLs
+    // ✅ Normalize image URL
     if (metadata.image && metadata.image.startsWith("/")) {
       const base = new URL(targetURL).origin;
       metadata.image = `${base}${metadata.image}`;
     }
 
-    // 🎯 Extract useful links only (ignore junk)
-    const ignoreList = ["facebook", "twitter", "whatsapp", "sms", "dmca", "contact", "home"];
-    $("a").each((i, el) => {
-      const href = $(el).attr("href");
-      const text = $(el).text().trim();
+    // 🎯 Extract only actual movie entries: <div class="f"> links
+    $("div.f").each((i, el) => {
+      const title = $(el).find("a").text().trim();
+      const href = $(el).find("a").attr("href");
+      const imgSrc = $(el).find("img").attr("src");
 
+      // ignore empty, header, or category links
       if (
+        title &&
         href &&
-        !ignoreList.some((bad) => href.toLowerCase().includes(bad)) &&
-        text.length > 1
+        !title.toLowerCase().includes("moviesda") &&
+        !title.toLowerCase().includes("disclaimer") &&
+        !title.toLowerCase().includes("telegram") &&
+        !title.toLowerCase().includes("collection")
       ) {
-        const fullUrl = href.startsWith("http")
-          ? href
-          : `${new URL(targetURL).origin}${href}`;
+        const base = new URL(targetURL).origin;
+        const fullUrl = href.startsWith("http") ? href : `${base}${href}`;
+        const fullImg = imgSrc
+          ? imgSrc.startsWith("http")
+            ? imgSrc
+            : `${base}${imgSrc}`
+          : null;
 
         results.push({
-          title: text,
+          title,
           url: fullUrl,
+          img: fullImg,
         });
       }
     });
 
-    // 🎞 Add poster image to results
-    if (metadata.image) {
-      results.forEach((item) => (item.img = metadata.image));
+    // If no valid movie results found
+    if (results.length === 0) {
+      return res.status(404).json({
+        source: targetURL,
+        message: "No movies found for the given language/year.",
+        metadata,
+        total: 0,
+        results: [],
+      });
     }
 
-    // ✅ Return data
+    // ✅ Send response
     res.status(200).json({
       source: targetURL,
       metadata,
