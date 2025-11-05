@@ -13,7 +13,7 @@ export default async function handler(req, res) {
 
   const baseURL = "https://moviesda14.com";
 
-  // 🧠 Fetch HTML
+  // 🧠 Fetch HTML safely
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
@@ -25,11 +25,12 @@ export default async function handler(req, res) {
     return data;
   }
 
-  // 🎬 Get poster (.jpg, .webp, etc.)
+  // 🎬 Extract real movie poster (.jpg / .webp)
   async function getPosterImage(movieUrl) {
     try {
       const html = await fetchHtml(movieUrl);
       const $ = cheerio.load(html);
+
       let img =
         $('meta[property="og:image"]').attr("content") ||
         $('meta[name="og:image"]').attr("content") ||
@@ -40,6 +41,7 @@ export default async function handler(req, res) {
       if (!img) return null;
       if (img.startsWith("/")) img = `${baseURL}${img}`;
       if (!img.match(/\.(jpg|jpeg|png|webp)$/i)) return null;
+
       return img;
     } catch {
       return null;
@@ -50,26 +52,13 @@ export default async function handler(req, res) {
     const html = await fetchHtml(decodeURIComponent(url));
     const $ = cheerio.load(html);
 
-    // 🧩 Extract pagination info
+    // 🧩 Extract simple pagination info
     const pagination = {
       current: parseInt($("#currentPage").text().trim()) || null,
       total: parseInt($("#totalPages").text().trim()) || null,
       next: null,
       prev: null,
-      pages: [],
     };
-
-    $(".pagination a").each((_, el) => {
-      const pageText = $(el).text().trim();
-      const href = $(el).attr("href");
-      if (!href || pageText === "»" || pageText === "«") return;
-
-      let pageNum = parseInt(pageText);
-      if (isNaN(pageNum)) return;
-
-      const fullUrl = href.startsWith("http") ? href : `${baseURL}${href}`;
-      pagination.pages.push({ page: pageNum, url: fullUrl });
-    });
 
     const nextPage = $(".pagination a.next").attr("href");
     const prevPage = $(".pagination a.prev").attr("href");
@@ -83,7 +72,7 @@ export default async function handler(req, res) {
         ? prevPage
         : `${baseURL}${prevPage}`;
 
-    // 🎞️ Extract movie list
+    // 🎞️ Extract movie list with real posters
     const movies = [];
     const items = $("div.f");
 
@@ -97,11 +86,12 @@ export default async function handler(req, res) {
       if (poster && poster.match(/\.(jpg|jpeg|png|webp)$/i)) {
         movies.push({ title, url: href, img: poster });
       } else {
-        // fallback to /img/dir.gif if real image not found
+        // fallback if no image found
         movies.push({ title, url: href, img: `${baseURL}/img/dir.gif` });
       }
     }
 
+    // ✅ Return clean JSON
     res.status(200).json({
       source: decodeURIComponent(url),
       total: movies.length,
