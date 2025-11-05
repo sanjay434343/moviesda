@@ -7,7 +7,6 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // Handle preflight (OPTIONS) request quickly
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -15,7 +14,6 @@ export default async function handler(req, res) {
   const targetURL = "https://moviesda14.com/tamil-2021-movies/";
 
   try {
-    // Fetch HTML content
     const { data: html } = await axios.get(targetURL, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -23,28 +21,26 @@ export default async function handler(req, res) {
     });
 
     const $ = cheerio.load(html);
-
-    // Scrape all movie links
     const results = [];
 
-    $("a").each((i, el) => {
+    // Scrape all movie entries (each div.f contains movie link)
+    $(".f a").each((i, el) => {
       const title = $(el).text().trim();
       const href = $(el).attr("href");
 
-      if (href && href.includes("moviesda14.com") && title.length > 2) {
-        results.push({
-          title,
-          url: href,
-        });
+      if (href && title) {
+        const absoluteURL = href.startsWith("http")
+          ? href
+          : `https://moviesda14.com${href}`;
+
+        results.push({ title, url: absoluteURL });
       }
     });
 
-    // Send full HTML and extracted data
     res.status(200).json({
       source: targetURL,
       total: results.length,
-      results,
-      html: html.substring(0, 5000) + "... [trimmed for safety]"
+      results
     });
 
   } catch (err) {
