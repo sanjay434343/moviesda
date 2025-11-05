@@ -2,17 +2,24 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  // ✅ Allow all origins
+  // ✅ Allow all origins (CORS)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const { url } = req.query;
-  const targetURL = url
-    ? decodeURIComponent(url)
-    : "https://moviesda14.com/tamil-2021-movies/";
+  const { url, lang, year } = req.query;
+
+  // 🎯 If URL is passed, use it. Otherwise, construct using lang + year
+  let targetURL;
+  if (url) {
+    targetURL = decodeURIComponent(url);
+  } else if (lang && year) {
+    targetURL = `https://moviesda14.com/${lang}-${year}-movies/`;
+  } else {
+    targetURL = "https://moviesda14.com/tamil-2021-movies/";
+  }
 
   try {
     const { data: html } = await axios.get(targetURL, {
@@ -57,23 +64,14 @@ export default async function handler(req, res) {
         null,
     };
 
-    // Normalize relative image URLs
+    // ✅ Normalize relative image URLs
     if (metadata.image && metadata.image.startsWith("/")) {
       const base = new URL(targetURL).origin;
       metadata.image = `${base}${metadata.image}`;
     }
 
-    // 🎯 Extract main download and watch links (ignore junk)
-    const ignoreList = [
-      "facebook",
-      "twitter",
-      "whatsapp",
-      "sms",
-      "dmca",
-      "contact",
-      "home",
-    ];
-
+    // 🎯 Extract useful links only (ignore junk)
+    const ignoreList = ["facebook", "twitter", "whatsapp", "sms", "dmca", "contact", "home"];
     $("a").each((i, el) => {
       const href = $(el).attr("href");
       const text = $(el).text().trim();
@@ -81,14 +79,7 @@ export default async function handler(req, res) {
       if (
         href &&
         !ignoreList.some((bad) => href.toLowerCase().includes(bad)) &&
-        (href.includes("download") ||
-          href.includes(".mp4") ||
-          href.includes(".mkv") ||
-          href.includes("cdn") ||
-          href.includes("stream") ||
-          href.includes("file") ||
-          href.includes("watch")) &&
-        text.length > 2
+        text.length > 1
       ) {
         const fullUrl = href.startsWith("http")
           ? href
@@ -101,12 +92,12 @@ export default async function handler(req, res) {
       }
     });
 
-    // 🎞 Include basic image or poster with each result
+    // 🎞 Add poster image to results
     if (metadata.image) {
       results.forEach((item) => (item.img = metadata.image));
     }
 
-    // Return result
+    // ✅ Return data
     res.status(200).json({
       source: targetURL,
       metadata,
