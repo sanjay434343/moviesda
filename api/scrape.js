@@ -2,7 +2,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  // ✅ CORS setup
+  // ✅ Allow all origins
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -10,9 +10,7 @@ export default async function handler(req, res) {
 
   const { url } = req.query;
   if (!url)
-    return res
-      .status(400)
-      .json({ error: "Missing ?url parameter (example: ?url=https://download.moviespage.site/download/page/93108)" });
+    return res.status(400).json({ error: "Missing ?url parameter" });
 
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
@@ -31,70 +29,79 @@ export default async function handler(req, res) {
     const html = await fetchHtml(targetURL);
     const $ = cheerio.load(html);
 
-    // 🎞 Extract metadata
-    const title = $("title").text().trim();
-    const image = $(".albumcover img").attr("src") || null;
-
-    const fileName = $(".details:contains('File Name')").text().replace("File Name:", "").trim() || null;
-    const size = $(".details:contains('File Size')").text().replace("File Size:", "").trim() || null;
-    const resolution = $(".details:contains('Video Size')").text().replace("Video Size:", "").trim() || null;
-    const format = $(".details:contains('Format')").text().replace("Format:", "").trim() || null;
-    const duration = $(".details:contains('Duration')").text().replace("Duration:", "").trim() || null;
-    const addedOn = $(".details:contains('Added On')").text().replace("Added On:", "").trim() || null;
-
-    // 🧩 Extract Download Servers
-    const downloadServers = [];
-    $("div.dline:contains('File Download Links')")
-      .next(".download")
-      .find("a")
-      .each((_, el) => {
-        const name = $(el).text().trim();
-        const href = $(el).attr("href");
-        if (href) {
-          downloadServers.push({
-            name,
-            url: href.startsWith("http") ? href : new URL(href, targetURL).href,
-          });
-        }
-      });
-
-    // 🎥 Extract Watch Online Servers
-    const watchServers = [];
-    $("div.dline:contains('Watch Online Links')")
-      .next(".download")
-      .find("a")
-      .each((_, el) => {
-        const name = $(el).text().trim();
-        const href = $(el).attr("href");
-        if (href) {
-          watchServers.push({
-            name,
-            url: href.startsWith("http") ? href : new URL(href, targetURL).href,
-          });
-        }
-      });
-
-    // ✅ Build response
-    const result = {
+    // 🖼️ Basic metadata
+    const details = {
       source: targetURL,
-      title,
-      image,
-      file: {
-        name: fileName,
-        size,
-        resolution,
-        format,
-        duration,
-        addedOn,
-      },
-      downloadServers,
-      watchServers,
+      title: $("title").text().trim() || null,
+      poster: $(".albumcover img").attr("src") || null,
+      fileName:
+        $(".details:contains('File Name')")
+          .text()
+          .replace("File Name:", "")
+          .trim() || null,
+      size:
+        $(".details:contains('File Size')")
+          .text()
+          .replace("File Size:", "")
+          .trim() || null,
+      videoSize:
+        $(".details:contains('Video Size')")
+          .text()
+          .replace("Video Size:", "")
+          .trim() || null,
+      format:
+        $(".details:contains('Format')")
+          .text()
+          .replace("Format:", "")
+          .trim() || null,
+      duration:
+        $(".details:contains('Duration')")
+          .text()
+          .replace("Duration:", "")
+          .trim() || null,
+      addedOn:
+        $(".details:contains('Added On')")
+          .text()
+          .replace("Added On:", "")
+          .trim() || null,
+      downloads: [],
+      watchOnline: [],
     };
 
-    res.status(200).json(result);
+    // Normalize poster URL if needed
+    if (details.poster && details.poster.startsWith("/")) {
+      details.poster = `https://moviesda14.com${details.poster}`;
+    }
+
+    // 🎯 File Download Links (Server 1, Server 2)
+    $(".download .dlink a").each((_, el) => {
+      const name = $(el).text().trim();
+      const href = $(el).attr("href");
+      if (href && href.includes(".mp4")) {
+        details.downloads.push({
+          server: name,
+          url: href,
+        });
+      }
+    });
+
+    // 🎬 Watch Online Links (onestream or play domain)
+    $(".download .dlink a").each((_, el) => {
+      const name = $(el).text().trim();
+      const href = $(el).attr("href");
+      if (href && href.includes("onestream")) {
+        details.watchOnline.push({
+          server: name,
+          url: href,
+        });
+      }
+    });
+
+    // ✅ Final clean response
+    res.status(200).json(details);
   } catch (err) {
     res.status(500).json({
-      error: "Failed to parse page",
+      error: "Failed to fetch or parse the page",
       details: err.message,
       source: url,
     });
