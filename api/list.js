@@ -8,10 +8,12 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const { url } = req.query;
-  if (!url) return res.status(400).json({ error: "Missing ?url parameter" });
+  if (!url)
+    return res.status(400).json({ error: "Missing ?url parameter" });
 
   const baseURL = "https://moviesda14.com";
 
+  // 🧠 Fetch HTML
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
@@ -23,12 +25,11 @@ export default async function handler(req, res) {
     return data;
   }
 
+  // 🎬 Get poster (.jpg, .webp, etc.)
   async function getPosterImage(movieUrl) {
     try {
       const html = await fetchHtml(movieUrl);
       const $ = cheerio.load(html);
-
-      // Try meta tags first
       let img =
         $('meta[property="og:image"]').attr("content") ||
         $('meta[name="og:image"]').attr("content") ||
@@ -37,10 +38,8 @@ export default async function handler(req, res) {
         $("img[src*='/uploads/']").first().attr("src");
 
       if (!img) return null;
-
       if (img.startsWith("/")) img = `${baseURL}${img}`;
       if (!img.match(/\.(jpg|jpeg|png|webp)$/i)) return null;
-
       return img;
     } catch {
       return null;
@@ -51,30 +50,66 @@ export default async function handler(req, res) {
     const html = await fetchHtml(decodeURIComponent(url));
     const $ = cheerio.load(html);
 
-    const movies = [];
+    // 🧩 Extract pagination info
+    const pagination = {
+      current: parseInt($("#currentPage").text().trim()) || null,
+      total: parseInt($("#totalPages").text().trim()) || null,
+      next: null,
+      prev: null,
+      pages: [],
+    };
 
+    $(".pagination a").each((_, el) => {
+      const pageText = $(el).text().trim();
+      const href = $(el).attr("href");
+      if (!href || pageText === "»" || pageText === "«") return;
+
+      let pageNum = parseInt(pageText);
+      if (isNaN(pageNum)) return;
+
+      const fullUrl = href.startsWith("http") ? href : `${baseURL}${href}`;
+      pagination.pages.push({ page: pageNum, url: fullUrl });
+    });
+
+    const nextPage = $(".pagination a.next").attr("href");
+    const prevPage = $(".pagination a.prev").attr("href");
+
+    if (nextPage)
+      pagination.next = nextPage.startsWith("http")
+        ? nextPage
+        : `${baseURL}${nextPage}`;
+    if (prevPage)
+      pagination.prev = prevPage.startsWith("http")
+        ? prevPage
+        : `${baseURL}${prevPage}`;
+
+    // 🎞️ Extract movie list
+    const movies = [];
     const items = $("div.f");
+
     for (const el of items) {
       const title = $(el).find("a").text().trim();
       let href = $(el).find("a").attr("href");
       if (!href || !title) continue;
-
       if (!href.startsWith("http")) href = `${baseURL}${href}`;
 
-      // Fetch poster for each movie
       const poster = await getPosterImage(href);
       if (poster && poster.match(/\.(jpg|jpeg|png|webp)$/i)) {
         movies.push({ title, url: href, img: poster });
+      } else {
+        // fallback to /img/dir.gif if real image not found
+        movies.push({ title, url: href, img: `${baseURL}/img/dir.gif` });
       }
     }
 
     res.status(200).json({
       source: decodeURIComponent(url),
       total: movies.length,
+      pagination,
       results: movies,
     });
   } catch (err) {
-    console.error("❌ Failed to scrape:", err.message);
+    console.error("❌ Error:", err.message);
     res.status(500).json({
       error: "Failed to scrape movie list",
       details: err.message,
