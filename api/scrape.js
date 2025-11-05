@@ -12,17 +12,6 @@ export default async function handler(req, res) {
 
   const baseURL = "https://moviesda14.com";
 
-  // 🧩 Generate clean poster URL
-  function generatePosterUrl(movieName) {
-    if (!movieName) return null;
-    const slug = movieName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "");
-    return `${baseURL}/uploads/posters/${slug}-2025.webp`;
-  }
-
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
@@ -56,6 +45,10 @@ export default async function handler(req, res) {
       const html = await fetchHtml(downloadPageUrl);
       const $ = cheerio.load(html);
       const fileDetails = {
+        img:
+          $(".albumcover img").attr("src") ||
+          $("meta[property='og:image']").attr("content") ||
+          null,
         size: $(".details:contains('File Size')").text().replace("File Size:", "").trim(),
         videoSize: $(".details:contains('Video Size')").text().replace("Video Size:", "").trim(),
         format: $(".details:contains('Format')").text().replace("Format:", "").trim(),
@@ -64,6 +57,11 @@ export default async function handler(req, res) {
         servers: [],
         cdn: [],
       };
+
+      if (fileDetails.img && fileDetails.img.startsWith("/")) {
+        fileDetails.img = `${baseURL}${fileDetails.img}`;
+      }
+
       $(".download .dlink a").each((_, el) => {
         const href = $(el).attr("href");
         if (href) {
@@ -71,10 +69,12 @@ export default async function handler(req, res) {
           fileDetails.servers.push(full);
         }
       });
+
       for (const s of fileDetails.servers) {
         const cdn = await getFinalCdnUrl(s);
         if (cdn) fileDetails.cdn.push(cdn);
       }
+
       return fileDetails;
     } catch {
       return null;
@@ -85,17 +85,32 @@ export default async function handler(req, res) {
     const html = await fetchHtml(movieUrl);
     const $ = cheerio.load(html);
 
-    const movieName = $("title").text().replace("Full Movie Download", "").trim() || "Unknown Movie";
-    const poster = generatePosterUrl(movieName);
+    const movieName =
+      $("title").text().replace("Full Movie Download", "").trim() || "Unknown Movie";
+
+    // ✅ Get REAL poster image from `.f` or meta tags
+    let poster =
+      $("div.f img").first().attr("src") ||
+      $('meta[property="og:image"]').attr("content") ||
+      $('meta[name="og:image"]').attr("content") ||
+      null;
+    if (poster && poster.startsWith("/")) {
+      poster = `${baseURL}${poster}`;
+    }
+
     const versions = [];
 
     $("div.f").each((_, el) => {
       const title = $(el).find("a").text().trim();
       const href = $(el).find("a").attr("href");
+      const img = $(el).find("img").attr("src");
+      const fullImg = img ? (img.startsWith("http") ? img : `${baseURL}${img}`) : null;
+
       if (href && title) {
         versions.push({
           title,
           url: href.startsWith("http") ? href : `${baseURL}${href}`,
+          img: fullImg,
         });
       }
     });
@@ -115,6 +130,7 @@ export default async function handler(req, res) {
           .map((_, el) => $$$($(el)).attr("href"))
           .get()
           .map((u) => (u.startsWith("http") ? u : `${baseURL}${u}`));
+
         const fileData = await extractDownloadPageData(serverLinks[0]);
         if (!fileData) continue;
 
