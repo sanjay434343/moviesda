@@ -1,189 +1,356 @@
-import axios from "axios";
-import * as cheerio from "cheerio";
+// api/scraper.js - Main API endpoint for Vercel
+const axios = require('axios');
+const cheerio = require('cheerio');
 
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+const BASE_URL = 'https://moviesda14.com';
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+};
 
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: "Missing ?url parameter" });
-
-  const baseURL = "https://moviesda14.com";
-
-  async function fetchHtml(u) {
-    const { data } = await axios.get(u, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-      },
+// Helper function to make requests
+async function fetchPage(url) {
+  try {
+    const response = await axios.get(url, { 
+      headers: HEADERS, 
       timeout: 15000,
+      validateStatus: () => true 
     });
-    return data;
+    return cheerio.load(response.data);
+  } catch (error) {
+    throw new Error(`Failed to fetch ${url}: ${error.message}`);
   }
+}
 
-  async function getFinalCdnUrl(pageUrl) {
-    try {
-      const html = await fetchHtml(pageUrl);
-      const mp4Match = html.match(/https?:\/\/[^\s"']+\.mp4/);
-      if (mp4Match) return mp4Match[0];
-      const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-      if (iframeMatch && iframeMatch[1].includes(".mp4")) return iframeMatch[1];
-      const metaMatch = html.match(/<meta[^>]+url=([^"'>]+)/i);
-      if (metaMatch && metaMatch[1]) return metaMatch[1];
-      const cdnMatch = html.match(/https?:\/\/[^\s"']*(cdn|hotshare|dl|uptodl)[^\s"']+\.mp4/i);
-      if (cdnMatch) return cdnMatch[0];
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function extractDownloadPageData(downloadPageUrl) {
-    try {
-      const html = await fetchHtml(downloadPageUrl);
-      const $ = cheerio.load(html);
-      const fileDetails = {
-        img:
-          $(".albumcover img").attr("src") ||
-          $("meta[property='og:image']").attr("content") ||
-          null,
-        size: $(".details:contains('File Size')").text().replace("File Size:", "").trim(),
-        videoSize: $(".details:contains('Video Size')").text().replace("Video Size:", "").trim(),
-        format: $(".details:contains('Format')").text().replace("Format:", "").trim(),
-        duration: $(".details:contains('Duration')").text().replace("Duration:", "").trim(),
-        addedOn: $(".details:contains('Added On')").text().replace("Added On:", "").trim(),
-        servers: [],
-        cdn: [],
-      };
-
-      if (fileDetails.img && fileDetails.img.startsWith("/")) {
-        fileDetails.img = `${baseURL}${fileDetails.img}`;
-      }
-
-      $(".download .dlink a").each((_, el) => {
-        const href = $(el).attr("href");
-        if (href) {
-          const full = href.startsWith("http") ? href : `${baseURL}${href}`;
-          fileDetails.servers.push(full);
-        }
+// Step 1: Get all year categories
+async function getCategories() {
+  const $ = await fetchPage(BASE_URL);
+  const categories = [];
+  
+  $('div.f a[href*="tamil-"][href*="movies/"]').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    
+    // Filter for year-based categories
+    if (/\d{4}/.test(href)) {
+      categories.push({
+        id: i + 1,
+        name: text,
+        url: href.startsWith('http') ? href : BASE_URL + href
       });
-
-      for (const s of fileDetails.servers) {
-        const cdn = await getFinalCdnUrl(s);
-        if (cdn) fileDetails.cdn.push(cdn);
-      }
-
-      return fileDetails;
-    } catch {
-      return null;
     }
+  });
+  
+  return categories;
+}
+
+// Step 2: Get movies from a category
+async function getMoviesFromCategory(categoryUrl) {
+  const $ = await fetchPage(categoryUrl);
+  const movies = [];
+  
+  $('div.f a[href$="-tamil-movie/"], div.f a[href*="-tamil-"]').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    
+    if (text && href && href.includes('-tamil-')) {
+      movies.push({
+        id: i + 1,
+        name: text,
+        url: href.startsWith('http') ? href : BASE_URL + href
+      });
+    }
+  });
+  
+  return movies;
+}
+
+// Step 3: Get movie details and quality options
+async function getMovieDetails(movieUrl) {
+  const $ = await fetchPage(movieUrl);
+  
+  const details = {
+    title: $('div.line h1').text().trim() || $('title').text().split('|')[0].trim(),
+    director: '',
+    starring: '',
+    genre: '',
+    rating: '',
+    language: '',
+    synopsis: '',
+    poster: '',
+    qualities: []
+  };
+  
+  // Extract movie info
+  $('#movie-info ul.movie-info li').each((i, el) => {
+    const text = $(el).text();
+    if (text.includes('Director:')) details.director = $(el).find('span').text().trim();
+    if (text.includes('Starring:')) details.starring = $(el).find('span').text().trim();
+    if (text.includes('Genres:')) details.genre = $(el).find('span').text().trim();
+    if (text.includes('Movie Rating:')) details.rating = $(el).find('span').text().trim();
+    if (text.includes('Language:')) details.language = $(el).find('span').text().trim();
+  });
+  
+  details.synopsis = $('.movie-synopsis').text().replace('Synopsis:', '').trim();
+  
+  const posterSrc = $('#movie-info img').attr('src');
+  if (posterSrc) {
+    details.poster = posterSrc.startsWith('http') ? posterSrc : BASE_URL + posterSrc;
+  }
+  
+  // Get quality options
+  $('div.f a[href*="original-"], div.f a[href*="-hd-"], div.f a[href*="-movie/"]').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    
+    if (href && !href.includes('-tamil-movie/')) {
+      details.qualities.push({
+        id: i + 1,
+        name: text,
+        url: href.startsWith('http') ? href : BASE_URL + href
+      });
+    }
+  });
+  
+  return details;
+}
+
+// Step 4: Get quality options from original page
+async function getQualityOptions(originalUrl) {
+  const $ = await fetchPage(originalUrl);
+  const options = [];
+  
+  $('div.f a').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    
+    if (href && (text.includes('1080p') || text.includes('720p') || text.includes('360p'))) {
+      options.push({
+        id: i + 1,
+        name: text,
+        url: href.startsWith('http') ? href : BASE_URL + href
+      });
+    }
+  });
+  
+  return options;
+}
+
+// Step 5: Get download file info
+async function getDownloadInfo(qualityUrl) {
+  const $ = await fetchPage(qualityUrl);
+  const info = {
+    fileName: '',
+    fileSize: '',
+    format: '',
+    downloadPageUrl: ''
+  };
+  
+  // Extract file info from the table
+  $('.mv-content .left ul li').each((i, el) => {
+    const text = $(el).text();
+    if (text.includes('File Size:')) info.fileSize = text.replace('File Size:', '').trim();
+    if (text.includes('Download Format:')) info.format = text.replace('Download Format:', '').trim();
+  });
+  
+  // Get download page link
+  const downloadLink = $('.mv-content .left ul li a').attr('href');
+  if (downloadLink) {
+    info.downloadPageUrl = downloadLink.startsWith('http') ? downloadLink : BASE_URL + downloadLink;
+  }
+  
+  info.fileName = $('.mv-content .left ul li strong').text().trim();
+  
+  return info;
+}
+
+// Step 6: Get server links from download page
+async function getServerLinks(downloadPageUrl) {
+  const $ = await fetchPage(downloadPageUrl);
+  const servers = [];
+  
+  $('.download .dlink a').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    
+    if (href) {
+      servers.push({
+        id: i + 1,
+        name: text,
+        url: href
+      });
+    }
+  });
+  
+  return servers;
+}
+
+// Step 7: Get final download links
+async function getFinalLinks(serverUrl) {
+  const $ = await fetchPage(serverUrl);
+  const links = {
+    download: [],
+    watch: []
+  };
+  
+  // Extract download links
+  $('.download .dlink a').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    
+    if (href && text.toLowerCase().includes('download')) {
+      links.download.push({
+        id: i + 1,
+        name: text,
+        url: href
+      });
+    } else if (href && text.toLowerCase().includes('watch')) {
+      links.watch.push({
+        id: i + 1,
+        name: text,
+        url: href
+      });
+    }
+  });
+  
+  return links;
+}
+
+// Main API Handler
+module.exports = async (req, res) => {
+  // Enable CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
   }
 
-  async function extractMovieData(movieUrl) {
-    const html = await fetchHtml(movieUrl);
-    const $ = cheerio.load(html);
-
-    const movieName =
-      $("title").text().replace("Full Movie Download", "").trim() || "Unknown Movie";
-
-    // ✅ Get REAL poster image from `.f` or meta tags
-    let poster =
-      $("div.f img").first().attr("src") ||
-      $('meta[property="og:image"]').attr("content") ||
-      $('meta[name="og:image"]').attr("content") ||
-      null;
-    if (poster && poster.startsWith("/")) {
-      poster = `${baseURL}${poster}`;
-    }
-
-    const versions = [];
-
-    $("div.f").each((_, el) => {
-      const title = $(el).find("a").text().trim();
-      const href = $(el).find("a").attr("href");
-      const img = $(el).find("img").attr("src");
-      const fullImg = img ? (img.startsWith("http") ? img : `${baseURL}${img}`) : null;
-
-      if (href && title) {
-        versions.push({
-          title,
-          url: href.startsWith("http") ? href : `${baseURL}${href}`,
-          img: fullImg,
-        });
-      }
-    });
-
-    const results = {};
-
-    for (const version of versions) {
-      try {
-        const subHtml = await fetchHtml(version.url);
-        const $$ = cheerio.load(subHtml);
-        const dlLink = $$("a[href*='/download/']").first().attr("href");
-        if (!dlLink) continue;
-        const absDL = dlLink.startsWith("http") ? dlLink : `${baseURL}${dlLink}`;
-        const dlHtml = await fetchHtml(absDL);
-        const $$$ = cheerio.load(dlHtml);
-        const serverLinks = $$$(".download .dlink a")
-          .map((_, el) => $$$($(el)).attr("href"))
-          .get()
-          .map((u) => (u.startsWith("http") ? u : `${baseURL}${u}`));
-
-        const fileData = await extractDownloadPageData(serverLinks[0]);
-        if (!fileData) continue;
-
-        const quality =
-          version.title.match(/1080p/i)
-            ? "1080p"
-            : version.title.match(/720/i)
-            ? "720p"
-            : version.title.match(/360/i)
-            ? "360p"
-            : "unknown";
-
-        results[quality] = {
-          size: fileData.size,
-          duration: fileData.duration,
-          format: fileData.format,
-          addedOn: fileData.addedOn,
-          videoSize: fileData.videoSize,
-          cdn: fileData.cdn[0] || null,
-        };
-      } catch (err) {
-        console.log("⚠️ Failed:", version.title, err.message);
-      }
-    }
-
-    return {
-      movie: movieName,
-      image: poster,
-      description: `${movieName} Tamil Movie HD Download`,
-      results,
-    };
-  }
+  const { action, url, categoryUrl, movieUrl, originalUrl, qualityUrl, downloadUrl, serverUrl } = req.query;
 
   try {
-    if (url.includes("-original-")) {
-      const result = await extractMovieData(url);
-      return res.status(200).json(result);
-    }
+    switch (action) {
+      case 'getCategories':
+        const categories = await getCategories();
+        return res.status(200).json({
+          success: true,
+          step: 1,
+          action: 'Categories fetched',
+          data: categories
+        });
 
-    const html = await fetchHtml(decodeURIComponent(url));
-    const $ = cheerio.load(html);
-    const link = $("div.f a[href*='-original-']").attr("href");
-    if (link) {
-      const abs = link.startsWith("http") ? link : `${baseURL}${link}`;
-      const result = await extractMovieData(abs);
-      return res.status(200).json(result);
-    }
+      case 'getMovies':
+        if (!categoryUrl) {
+          return res.status(400).json({ success: false, error: 'categoryUrl is required' });
+        }
+        const movies = await getMoviesFromCategory(categoryUrl);
+        return res.status(200).json({
+          success: true,
+          step: 2,
+          action: 'Movies fetched',
+          data: movies
+        });
 
-    res.status(200).json({ message: "No movie found" });
-  } catch (err) {
-    res.status(500).json({
-      error: "Failed to scrape",
-      details: err.message,
+      case 'getMovieDetails':
+        if (!movieUrl) {
+          return res.status(400).json({ success: false, error: 'movieUrl is required' });
+        }
+        const details = await getMovieDetails(movieUrl);
+        return res.status(200).json({
+          success: true,
+          step: 3,
+          action: 'Movie details fetched',
+          data: details
+        });
+
+      case 'getQualityOptions':
+        if (!originalUrl) {
+          return res.status(400).json({ success: false, error: 'originalUrl is required' });
+        }
+        const qualities = await getQualityOptions(originalUrl);
+        return res.status(200).json({
+          success: true,
+          step: 4,
+          action: 'Quality options fetched',
+          data: qualities
+        });
+
+      case 'getDownloadInfo':
+        if (!qualityUrl) {
+          return res.status(400).json({ success: false, error: 'qualityUrl is required' });
+        }
+        const downloadInfo = await getDownloadInfo(qualityUrl);
+        return res.status(200).json({
+          success: true,
+          step: 5,
+          action: 'Download info fetched',
+          data: downloadInfo
+        });
+
+      case 'getServerLinks':
+        if (!downloadUrl) {
+          return res.status(400).json({ success: false, error: 'downloadUrl is required' });
+        }
+        const servers = await getServerLinks(downloadUrl);
+        return res.status(200).json({
+          success: true,
+          step: 6,
+          action: 'Server links fetched',
+          data: servers
+        });
+
+      case 'getFinalLinks':
+        if (!serverUrl) {
+          return res.status(400).json({ success: false, error: 'serverUrl is required' });
+        }
+        const finalLinks = await getFinalLinks(serverUrl);
+        return res.status(200).json({
+          success: true,
+          step: 7,
+          action: 'Final download links fetched',
+          data: finalLinks
+        });
+
+      default:
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid action',
+          availableActions: [
+            'getCategories',
+            'getMovies',
+            'getMovieDetails',
+            'getQualityOptions',
+            'getDownloadInfo',
+            'getServerLinks',
+            'getFinalLinks'
+          ]
+        });
+    }
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
+};
+
+// For local testing
+if (require.main === module) {
+  const http = require('http');
+  const url = require('url');
+  
+  const server = http.createServer((req, res) => {
+    const parsedUrl = url.parse(req.url, true);
+    req.query = parsedUrl.query;
+    module.exports(req, res);
+  });
+  
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log('\nExample API calls:');
+    console.log(`- GET /api/scraper?action=getCategories`);
+    console.log(`- GET /api/scraper?action=getMovies&categoryUrl=https://moviesda14.com/tamil-2025-movies/`);
+  });
 }
