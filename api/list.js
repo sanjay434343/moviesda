@@ -1,6 +1,15 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
 
+// Helper to resolve relative URLs
+function getAbsoluteUrl(baseURL, url) {
+  if (!url) return null;
+  if (url.startsWith("http")) return url;
+  if (url.startsWith("/")) return `${baseURL}${url}`;
+  // Defensive: if weirdly not "/" and not "http"
+  return `${baseURL}/${url}`;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -13,7 +22,6 @@ export default async function handler(req, res) {
 
   const baseURL = "https://moviesda14.com";
 
-  // 🧠 Fetch HTML safely
   async function fetchHtml(u) {
     const { data } = await axios.get(u, {
       headers: {
@@ -25,7 +33,6 @@ export default async function handler(req, res) {
     return data;
   }
 
-  // 🎬 Extract real movie poster (.jpg / .webp)
   async function getPosterImage(movieUrl) {
     try {
       const html = await fetchHtml(movieUrl);
@@ -52,46 +59,73 @@ export default async function handler(req, res) {
     const html = await fetchHtml(decodeURIComponent(url));
     const $ = cheerio.load(html);
 
-    // 🧩 Extract simple pagination info
+    // Extract improved pagination info
     const pagination = {
-      current: parseInt($("#currentPage").text().trim()) || null,
-      total: parseInt($("#totalPages").text().trim()) || null,
+      current: null,
+      total: null,
+      pages: [],
       next: null,
       prev: null,
     };
 
-    const nextPage = $(".pagination a.next").attr("href");
-    const prevPage = $(".pagination a.prev").attr("href");
+    // Get current page, total pages
+    pagination.current = parseInt($("#currentPage").text().trim()) ||
+      parseInt($(".pagination a.active").first().text().trim()) || 1;
+    pagination.total = parseInt($("#totalPages").text().trim()) || null;
 
-    if (nextPage)
-      pagination.next = nextPage.startsWith("http")
-        ? nextPage
-        : `${baseURL}${nextPage}`;
-    if (prevPage)
-      pagination.prev = prevPage.startsWith("http")
-        ? prevPage
-        : `${baseURL}${prevPage}`;
-
-    // 🎞️ Extract movie list with real posters
-    const movies = [];
-    const items = $("div.f");
-
-    for (const el of items) {
-      const title = $(el).find("a").text().trim();
-      let href = $(el).find("a").attr("href");
-      if (!href || !title) continue;
-      if (!href.startsWith("http")) href = `${baseURL}${href}`;
-
-      const poster = await getPosterImage(href);
-      if (poster && poster.match(/\.(jpg|jpeg|png|webp)$/i)) {
-        movies.push({ title, url: href, img: poster });
-      } else {
-        // fallback if no image found
-        movies.push({ title, url: href, img: `${baseURL}/img/dir.gif` });
+    // Parse available <a> in .pagination
+    $(".pagination a").each(function () {
+      const pageText = $(this).text().trim();
+      const href = $(this).attr("href");
+      // Only add if it's a page number
+      if (/^\d+$/.test(pageText)) {
+        pagination.pages.push({
+          number: parseInt(pageText),
+          url: getAbsoluteUrl(baseURL, href),
+          isCurrent: $(this).hasClass("active"),
+        });
+      }
+      // Detect next/prev
+      if ($(this).hasClass("next")) {
+        pagination.next = getAbsoluteUrl(baseURL, href);
+      } else if ($(this).hasClass("prev")) {
+        pagination.prev = getAbsoluteUrl(baseURL, href);
+      }
+    });
+    // In some cases, prev is the previous li sibling of active
+    if (!pagination.prev) {
+      const active = $(".pagination a.active").parent();
+      const prevLi = active.prev("li").find("a");
+      if (prevLi.length) {
+        pagination.prev = getAbsoluteUrl(baseURL, prevLi.attr("href"));
       }
     }
+    // Defensive: add ellipsis or last page, if pagination.total is set but not all links are present
+    if (pagination.total && !pagination.pages.find(p => p.number === pagination.total)) {
+      pagination.pages.push({
+        number: pagination.total,
+        url: getAbsoluteUrl(baseURL, `/tamil-2025-movies/?page=${pagination.total}`),
+        isCurrent: false,
+      });
+    }
 
-    // ✅ Return clean JSON
+    // Extract movie list with real posters, FAST (no await in main loop, asyncMap)
+    const items = $("div.f");
+    const movies = await Promise.all(
+      items.map(async (i, el) => {
+        const title = $(el).find("a").text().trim();
+        let href = $(el).find("a").attr("href");
+        if (!href || !title) return null;
+        href = getAbsoluteUrl(baseURL, href);
+
+        let poster = await getPosterImage(href);
+        if (!(poster && poster.match(/\.(jpg|jpeg|png|webp)$/i))) {
+          poster = `${baseURL}/img/dir.gif`;
+        }
+        return { title, url: href, img: poster };
+      }).get()
+    ).then(resArr => resArr.filter(Boolean));
+
     res.status(200).json({
       source: decodeURIComponent(url),
       total: movies.length,
