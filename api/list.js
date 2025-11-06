@@ -1,12 +1,10 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
 
-// Helper to resolve relative URLs
 function getAbsoluteUrl(baseURL, url) {
   if (!url) return null;
   if (url.startsWith("http")) return url;
   if (url.startsWith("/")) return `${baseURL}${url}`;
-  // Defensive: if weirdly not "/" and not "http"
   return `${baseURL}/${url}`;
 }
 
@@ -48,7 +46,6 @@ export default async function handler(req, res) {
       if (!img) return null;
       if (img.startsWith("/")) img = `${baseURL}${img}`;
       if (!img.match(/\.(jpg|jpeg|png|webp)$/i)) return null;
-
       return img;
     } catch {
       return null;
@@ -59,57 +56,31 @@ export default async function handler(req, res) {
     const html = await fetchHtml(decodeURIComponent(url));
     const $ = cheerio.load(html);
 
-    // Extract improved pagination info
+    // Extract simple pagination info
+    const current = parseInt($("#currentPage").text().trim()) ||
+      parseInt($(".pagination a.active").first().text().trim()) || 1;
+    const total = parseInt($("#totalPages").text().trim()) ||
+      // fallback: last .pagination link number
+      (function() {
+        let last = null;
+        $(".pagination a").each(function () {
+          const t = $(this).text().trim();
+          if (/^\d+$/.test(t)) last = parseInt(t);
+        });
+        return last;
+      })();
+
+    const nextPage = $(".pagination a.next").attr("href");
+    const prevPage = $(".pagination a.prev").attr("href");
+
+    // Pagination for only required fields
     const pagination = {
-      current: null,
-      total: null,
-      pages: [],
-      next: null,
-      prev: null,
+      current,
+      total,
+      next: nextPage ? getAbsoluteUrl(baseURL, nextPage) : null,
+      prev: prevPage ? getAbsoluteUrl(baseURL, prevPage) : null,
     };
 
-    // Get current page, total pages
-    pagination.current = parseInt($("#currentPage").text().trim()) ||
-      parseInt($(".pagination a.active").first().text().trim()) || 1;
-    pagination.total = parseInt($("#totalPages").text().trim()) || null;
-
-    // Parse available <a> in .pagination
-    $(".pagination a").each(function () {
-      const pageText = $(this).text().trim();
-      const href = $(this).attr("href");
-      // Only add if it's a page number
-      if (/^\d+$/.test(pageText)) {
-        pagination.pages.push({
-          number: parseInt(pageText),
-          url: getAbsoluteUrl(baseURL, href),
-          isCurrent: $(this).hasClass("active"),
-        });
-      }
-      // Detect next/prev
-      if ($(this).hasClass("next")) {
-        pagination.next = getAbsoluteUrl(baseURL, href);
-      } else if ($(this).hasClass("prev")) {
-        pagination.prev = getAbsoluteUrl(baseURL, href);
-      }
-    });
-    // In some cases, prev is the previous li sibling of active
-    if (!pagination.prev) {
-      const active = $(".pagination a.active").parent();
-      const prevLi = active.prev("li").find("a");
-      if (prevLi.length) {
-        pagination.prev = getAbsoluteUrl(baseURL, prevLi.attr("href"));
-      }
-    }
-    // Defensive: add ellipsis or last page, if pagination.total is set but not all links are present
-    if (pagination.total && !pagination.pages.find(p => p.number === pagination.total)) {
-      pagination.pages.push({
-        number: pagination.total,
-        url: getAbsoluteUrl(baseURL, `/tamil-2025-movies/?page=${pagination.total}`),
-        isCurrent: false,
-      });
-    }
-
-    // Extract movie list with real posters, FAST (no await in main loop, asyncMap)
     const items = $("div.f");
     const movies = await Promise.all(
       items.map(async (i, el) => {
