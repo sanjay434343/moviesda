@@ -1,3 +1,4 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 
@@ -409,7 +410,7 @@ async function getMultipleQualitiesMovieLinks(movieUrl: string, showAllSteps: bo
       if (!servers || servers.length === 0) continue;
 
       // Step 4: get actual CDN/file
-      const serverUrls = servers.map(s => s.url);
+      const serverUrls = servers.map((s: any) => s.url);
       steps.push({ step: 4, status: '⏳ pending', message: `Fetching actual CDN/file URLs for ${q.name}...`, count: serverUrls.length });
       const cdnLinks = await getActualCDNLinks(serverUrls, q.quality);
       steps.at(-1).status = '✅ completed';
@@ -487,8 +488,8 @@ async function getWebSeriesAllEpisodes(seriesPageUrl: string) {
   };
 }
 
-// Main API Handler (for Next.js or Vercel serverless)
-export default async function handler(req: any, res: any) {
+// Main Vercel Serverless API Handler
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -497,85 +498,104 @@ export default async function handler(req: any, res: any) {
 
   const { action, categoryUrl, movieUrl, seriesUrl, originalUrl, qualityUrl, downloadUrl, serverUrl, page, showSteps } = req.query;
 
+  // Defensive: Axios and parsing errors 
   try {
     switch (action) {
       case 'getYears':
-        const categories = await getYearCategories();
-        return res.status(200).json({
-          success: true,
-          action: 'Year categories fetched',
-          data: categories,
-          count: categories.length
-        });
+        {
+          const categories = await getYearCategories();
+          return res.status(200).json({
+            success: true,
+            action: 'Year categories fetched',
+            data: categories,
+            count: categories.length
+          });
+        }
 
       case 'getMovies':
-        if (!categoryUrl) return res.status(400).json({ success: false, error: 'categoryUrl parameter is required' });
-        const result = await getMoviesFromCategory(categoryUrl, parseInt(page) || 1);
-        return res.status(200).json({
-          success: true,
-          action: 'Movies fetched',
-          data: result.movies,
-          pagination: result.pagination,
-          count: result.movies.length
-        });
+        {
+          if (!categoryUrl) return res.status(400).json({ success: false, error: 'categoryUrl parameter is required' });
+          const result = await getMoviesFromCategory(categoryUrl as string, parseInt(page as string) || 1);
+          return res.status(200).json({
+            success: true,
+            action: 'Movies fetched',
+            data: result.movies,
+            pagination: result.pagination,
+            count: result.movies.length
+          });
+        }
 
       case 'getMovieDetails':
-        if (!movieUrl && !seriesUrl) return res.status(400).json({ success: false, error: 'movieUrl (or seriesUrl) parameter is required' });
-        const details = await getMovieDetails(movieUrl || seriesUrl!);
-        return res.status(200).json({
-          success: true,
-          action: 'Movie details fetched',
-          data: details
-        });
+        {
+          if (!movieUrl && !seriesUrl) return res.status(400).json({ success: false, error: 'movieUrl (or seriesUrl) parameter is required' });
+          const details = await getMovieDetails((movieUrl || seriesUrl) as string);
+          return res.status(200).json({
+            success: true,
+            action: 'Movie details fetched',
+            data: details
+          });
+        }
 
       case 'getQualityOptions':
-        if (!originalUrl) return res.status(400).json({ success: false, error: 'originalUrl parameter is required' });
-        const qualities = await getQualityOptions(originalUrl);
-        return res.status(200).json({
-          success: true,
-          action: 'Quality options fetched',
-          data: qualities
-        });
+        {
+          if (!originalUrl) return res.status(400).json({ success: false, error: 'originalUrl parameter is required' });
+          const qualities = await getQualityOptions(originalUrl as string);
+          return res.status(200).json({
+            success: true,
+            action: 'Quality options fetched',
+            data: qualities
+          });
+        }
 
       case 'getDownloadInfo':
-        if (!qualityUrl) return res.status(400).json({ success: false, error: 'qualityUrl parameter is required' });
-        const downloadInfo = await getDownloadInfo(qualityUrl);
-        return res.status(200).json({
-          success: true,
-          action: 'Download info fetched',
-          data: downloadInfo
-        });
+        {
+          if (!qualityUrl) return res.status(400).json({ success: false, error: 'qualityUrl parameter is required' });
+          const downloadInfo = await getDownloadInfo(qualityUrl as string);
+          return res.status(200).json({
+            success: true,
+            action: 'Download info fetched',
+            data: downloadInfo
+          });
+        }
 
       case 'getServerLinks':
-        if (!downloadUrl) return res.status(400).json({ success: false, error: 'downloadUrl parameter is required' });
-        const servers = await getServerLinks(downloadUrl);
-        return res.status(200).json({
-          success: true,
-          action: 'Server links fetched',
-          data: servers
-        });
+        {
+          if (!downloadUrl) return res.status(400).json({ success: false, error: 'downloadUrl parameter is required' });
+          const servers = await getServerLinks(downloadUrl as string);
+          return res.status(200).json({
+            success: true,
+            action: 'Server links fetched',
+            data: servers
+          });
+        }
 
       case 'getCDNLinks':
-        if (!serverUrl) return res.status(400).json({ success: false, error: 'serverUrl parameter is required (comma-separated for multiple)' });
-        const serverUrls = serverUrl.split(',').map((url: string) => url.trim());
-        const cdnLinks = await getActualCDNLinks(serverUrls);
-        return res.status(200).json({
-          success: true,
-          action: 'CDN links fetched',
-          data: cdnLinks
-        });
+        {
+          if (!serverUrl) return res.status(400).json({ success: false, error: 'serverUrl parameter is required (comma-separated for multiple)' });
+          const serverUrls = (serverUrl as string).split(',').map(url => url.trim());
+          const cdnLinks = await getActualCDNLinks(serverUrls);
+          return res.status(200).json({
+            success: true,
+            action: 'CDN links fetched',
+            data: cdnLinks
+          });
+        }
 
       case 'getCompleteLinks':
-        if (!movieUrl) return res.status(400).json({ success: false, error: 'movieUrl parameter is required' });
-        // Movie scraper: all quality paths, grab all qualities, max 3 per quality for summary
-        const complete = await getMultipleQualitiesMovieLinks(movieUrl, showSteps === 'true' || showSteps === true);
-        return res.status(200).json(complete);
+        {
+          if (!movieUrl) return res.status(400).json({ success: false, error: 'movieUrl parameter is required' });
+          // Movie scraper: all quality paths, grab all qualities, max 3 per quality for summary
+          const complete = await getMultipleQualitiesMovieLinks(movieUrl as string, showSteps === 'true' || showSteps === true);
+          return res.status(200).json(complete);
+        }
 
       case 'getWebSeriesEpisodes':
-        if (!seriesUrl) return res.status(400).json({ success: false, error: 'seriesUrl parameter is required' });
-        // Webseries: only list all episode basic info. Episode downloader will be separate step.
-        const webseries = await getWebSeriesAllEpisodes(seriesUrl);
-        return res.status(200).json(webseries);
+        {
+          if (!seriesUrl) return res.status(400).json({ success: false, error: 'seriesUrl parameter is required' });
+          // Webseries: only list all episode basic info. Episode downloader will be separate step.
+          const webseries = await getWebSeriesAllEpisodes(seriesUrl as string);
+          return res.status(200).json(webseries);
+        }
 
       default:
         return res.status(400).json({
@@ -596,6 +616,7 @@ export default async function handler(req: any, res: any) {
     }
   } catch (error: any) {
     console.error('API Error:', error);
+    // Directly output error details for Vercel logs
     return res.status(500).json({
       success: false,
       error: error.message,
