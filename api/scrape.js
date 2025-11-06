@@ -54,28 +54,40 @@ async function getYearCategories() {
 }
 
 // Step 2: Get movies from category page
+// Step 2: Get movies from category page
 async function getMoviesFromCategory(categoryUrl, page = 1) {
   const url = page > 1 ? `${categoryUrl}?page=${page}` : categoryUrl;
   const $ = await fetchPage(url);
   const movies = [];
-  
+
   $('div.f a[href*="-tamil-movie/"]').each((i, el) => {
     const text = $(el).text().trim();
     const href = $(el).attr('href');
-    
+    let img = $(el).find('img').attr('src') || '';
+
+    // Normalize relative URLs
+    if (img && !img.startsWith('http')) {
+      img = BASE_URL + img;
+    }
+
+    // Only include valid image formats (jpg, jpeg, png, webp)
+    const isValidImage = /\.(jpg|jpeg|png|webp)$/i.test(img);
+    if (!isValidImage) img = ''; // Ignore .gif and others
+
     if (text && href && href.includes('-tamil-movie/')) {
       movies.push({
         id: i + 1,
         name: text,
         url: href.startsWith('http') ? href : BASE_URL + href,
-        slug: href.replace(/^\/|\/$/g, '')
+        slug: href.replace(/^\/|\/$/g, ''),
+        poster: img || null // Return null if no valid image
       });
     }
   });
-  
+
   const totalPages = parseInt($('#totalPages').text()) || 1;
   const currentPage = parseInt($('#currentPage').text()) || 1;
-  
+
   return {
     movies,
     pagination: {
@@ -85,6 +97,7 @@ async function getMoviesFromCategory(categoryUrl, page = 1) {
     }
   };
 }
+
 
 // Step 3: Get movie details
 async function getMovieDetails(movieUrl) {
