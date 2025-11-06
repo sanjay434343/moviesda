@@ -30,6 +30,45 @@ function extractQuality(text) {
   return qualityMatch ? qualityMatch[1].toUpperCase() : 'Unknown';
 }
 
+// Utility to get a valid poster image (.jpg, .png, .webp only)
+function getValidPosterFromPicture($, selector) {
+  // Accept only .jpg, .jpeg, .png, .webp formats, not .gif or .avif
+  const validImageRegex = /\.(jpg|jpeg|png|webp)$/i;
+  let posterUrl = "";
+
+  // Find <picture> element (if it exists)
+  const picture = $(selector).find('picture');
+  if (picture.length) {
+    // search all <source> tags first for a valid image
+    picture.find('source').each((i, el) => {
+      const srcset = $(el).attr('srcset');
+      if (srcset && validImageRegex.test(srcset)) {
+        posterUrl = srcset;
+        return false; // break each()
+      }
+    });
+    // Then try <img> tag inside <picture>
+    if (!posterUrl) {
+      const imgSrc = picture.find('img').attr('src');
+      if (imgSrc && validImageRegex.test(imgSrc)) {
+        posterUrl = imgSrc;
+      }
+    }
+  } else {
+    // Fallback: try <img> under selector directly
+    const imgSrc = $(selector).find('img').attr('src');
+    if (imgSrc && validImageRegex.test(imgSrc)) {
+      posterUrl = imgSrc;
+    }
+  }
+
+  // Add BASE_URL for relative links
+  if (posterUrl && !posterUrl.startsWith('http')) {
+    posterUrl = BASE_URL + posterUrl;
+  }
+  return posterUrl || null;
+}
+
 // Step 1: Get year categories from homepage
 async function getYearCategories() {
   const $ = await fetchPage(BASE_URL);
@@ -54,7 +93,6 @@ async function getYearCategories() {
 }
 
 // Step 2: Get movies from category page
-// Step 2: Get movies from category page
 async function getMoviesFromCategory(categoryUrl, page = 1) {
   const url = page > 1 ? `${categoryUrl}?page=${page}` : categoryUrl;
   const $ = await fetchPage(url);
@@ -63,6 +101,7 @@ async function getMoviesFromCategory(categoryUrl, page = 1) {
   $('div.f a[href*="-tamil-movie/"]').each((i, el) => {
     const text = $(el).text().trim();
     const href = $(el).attr('href');
+
     let img = $(el).find('img').attr('src') || '';
 
     // Normalize relative URLs
@@ -70,17 +109,29 @@ async function getMoviesFromCategory(categoryUrl, page = 1) {
       img = BASE_URL + img;
     }
 
-    // Only include valid image formats (jpg, jpeg, png, webp)
+    // Only include valid image formats (.jpg, .jpeg, .png, .webp)
     const isValidImage = /\.(jpg|jpeg|png|webp)$/i.test(img);
-    if (!isValidImage) img = ''; // Ignore .gif and others
+    if (!isValidImage) img = ''; // Ignore .gif, .avif and others
 
-    if (text && href && href.includes('-tamil-movie/')) {
+    let poster = img || null;
+
+    // Some movie links don't provide <img>, try to fetch from the movie page using getMovieDetails (one-by-one)
+    if (!poster && href && href.includes('-tamil-movie/')) {
+      const movieDetailsUrl = href.startsWith('http') ? href : BASE_URL + href;
+      movies.push({
+        id: i + 1,
+        name: text,
+        url: movieDetailsUrl,
+        slug: href.replace(/^\/|\/$/g, ''),
+        poster: null // This will be filled in UI via another API call if needed
+      });
+    } else if (text && href && href.includes('-tamil-movie/')) {
       movies.push({
         id: i + 1,
         name: text,
         url: href.startsWith('http') ? href : BASE_URL + href,
         slug: href.replace(/^\/|\/$/g, ''),
-        poster: img || null // Return null if no valid image
+        poster: poster
       });
     }
   });
@@ -97,7 +148,6 @@ async function getMoviesFromCategory(categoryUrl, page = 1) {
     }
   };
 }
-
 
 // Step 3: Get movie details
 async function getMovieDetails(movieUrl) {
@@ -123,14 +173,12 @@ async function getMovieDetails(movieUrl) {
     if (text.includes('Movie Rating:')) details.rating = $(el).find('span').text().trim();
     if (text.includes('Language:')) details.language = $(el).find('span').text().trim();
   });
-  
+
   details.synopsis = $('.movie-synopsis').text().replace('Synopsis:', '').trim();
-  
-  const posterSrc = $('#movie-info img').attr('src');
-  if (posterSrc) {
-    details.poster = posterSrc.startsWith('http') ? posterSrc : BASE_URL + posterSrc;
-  }
-  
+
+  // Use only jpg, jpeg, png, webp poster from #movie-info picture
+  details.poster = getValidPosterFromPicture($, '#movie-info');
+
   // Get original movie link
   $('div.f a[href*="-original-movie/"]').each((i, el) => {
     const text = $(el).text().trim();
@@ -156,7 +204,7 @@ async function getQualityOptions(originalUrl) {
   $('div.f a[href*="-hd-movie/"], div.f a[href*="p-movie/"]').each((i, el) => {
     const text = $(el).text().trim();
     const href = $(el).attr('href');
-    
+
     if (href && (text.includes('1080p') || text.includes('720p') || text.includes('360p'))) {
       options.push({
         id: i + 1,
@@ -182,21 +230,18 @@ async function getDownloadInfo(qualityUrl) {
     downloadPageUrl: ''
   };
   
-  // Extract file info from mv-content
   $('.mv-content .left ul li').each((i, el) => {
     const text = $(el).text();
     if (text.includes('File Size:')) info.fileSize = text.replace('File Size:', '').trim();
     if (text.includes('Download Format:')) info.format = text.replace('Download Format:', '').trim();
   });
-  
-  // Get download page link
+
   const downloadLink = $('.mv-content .left ul li a').attr('href');
   if (downloadLink) {
     info.downloadPageUrl = downloadLink.startsWith('http') ? downloadLink : BASE_URL + downloadLink;
   }
-  
   info.fileName = $('.mv-content .left ul li strong').text().trim();
-  
+
   return info;
 }
 
@@ -205,7 +250,6 @@ async function getServerLinks(downloadPageUrl) {
   const $ = await fetchPage(downloadPageUrl);
   const servers = [];
   
-  // Get download server links
   $('.download .dlink a, .songinfo .download .dlink a').each((i, el) => {
     const text = $(el).text().trim();
     const href = $(el).attr('href');
@@ -230,11 +274,8 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
   for (const serverUrl of serverUrls) {
     try {
       const $ = await fetchPage(serverUrl);
-      
-      // Look for direct download links on the server page
       const links = [];
       
-      // Method 1: Check for direct download buttons/links
       $('.download a, .dlink a, #download-link, .btn-download').each((i, el) => {
         const href = $(el).attr('href');
         const text = $(el).text().trim();
@@ -256,12 +297,10 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
           });
         }
       });
-      
-      // Method 2: Check for embedded links in scripts
+
       $('script').each((i, el) => {
         const scriptContent = $(el).html();
         if (scriptContent) {
-          // Look for direct file URLs in JavaScript
           const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
           if (urlMatches) {
             urlMatches.forEach(url => {
@@ -275,8 +314,7 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
           }
         }
       });
-      
-      // Method 3: Check for meta refresh or redirect
+
       const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
       if (metaRefresh) {
         const urlMatch = metaRefresh.match(/url=(.+)/i);
@@ -444,7 +482,6 @@ async function getCompleteMovieLinks(movieUrl, showAllSteps = false) {
       });
     });
     
-    // Return based on showAllSteps flag
     if (showAllSteps) {
       return {
         success: true,
@@ -465,7 +502,6 @@ async function getCompleteMovieLinks(movieUrl, showAllSteps = false) {
         }
       };
     } else {
-      // Only summary
       return {
         success: true,
         summary: {
@@ -489,7 +525,6 @@ async function getCompleteMovieLinks(movieUrl, showAllSteps = false) {
       steps[steps.length - 1].status = '❌ failed';
       steps[steps.length - 1].error = error.message;
     }
-    
     return {
       success: false,
       error: error.message,
@@ -503,7 +538,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
+
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
