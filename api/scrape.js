@@ -1,4 +1,4 @@
-// api/scraper.js - Complete Vercel Serverless Function
+// api/scraper.js - Complete Vercel Serverless Function with Step 6
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 
@@ -204,45 +204,93 @@ async function getServerLinks(downloadPageUrl) {
   return servers;
 }
 
-// Step 7: Get final CDN links
-async function getFinalLinks(serverUrl) {
-  const $ = await fetchPage(serverUrl);
-  const links = {
-    download: [],
-    watch: []
-  };
+// Step 7: NEW - Get actual CDN links from server pages
+async function getActualCDNLinks(serverUrls) {
+  const cdnLinks = [];
   
-  // Get download links
-  $('.download .dlink a, .songinfo .download .dlink a').each((i, el) => {
-    const text = $(el).text().trim();
-    const href = $(el).attr('href');
-    
-    if (href) {
-      if (text.toLowerCase().includes('download')) {
-        links.download.push({
-          id: links.download.length + 1,
-          name: text,
-          url: href
-        });
-      } else if (text.toLowerCase().includes('watch')) {
-        links.watch.push({
-          id: links.watch.length + 1,
-          name: text,
-          url: href
-        });
+  for (const serverUrl of serverUrls) {
+    try {
+      const $ = await fetchPage(serverUrl);
+      
+      // Look for direct download links on the server page
+      const links = [];
+      
+      // Method 1: Check for direct download buttons/links
+      $('.download a, .dlink a, #download-link, .btn-download').each((i, el) => {
+        const href = $(el).attr('href');
+        const text = $(el).text().trim();
+        
+        if (href && (
+          href.includes('.mp4') || 
+          href.includes('.mkv') ||
+          href.includes('cdn') ||
+          href.includes('storage') ||
+          text.toLowerCase().includes('download')
+        )) {
+          links.push({
+            text: text || 'Direct Download',
+            url: href,
+            type: 'cdn'
+          });
+        }
+      });
+      
+      // Method 2: Check for embedded links in scripts or meta tags
+      $('script').each((i, el) => {
+        const scriptContent = $(el).html();
+        if (scriptContent) {
+          // Look for direct file URLs in JavaScript
+          const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
+          if (urlMatches) {
+            urlMatches.forEach(url => {
+              links.push({
+                text: 'CDN Link',
+                url: url,
+                type: 'cdn'
+              });
+            });
+          }
+        }
+      });
+      
+      // Method 3: Check for meta refresh or redirect
+      const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
+      if (metaRefresh) {
+        const urlMatch = metaRefresh.match(/url=(.+)/i);
+        if (urlMatch && urlMatch[1]) {
+          links.push({
+            text: 'Redirect Link',
+            url: urlMatch[1],
+            type: 'redirect'
+          });
+        }
       }
+      
+      cdnLinks.push({
+        serverUrl: serverUrl,
+        links: links,
+        found: links.length
+      });
+      
+    } catch (error) {
+      cdnLinks.push({
+        serverUrl: serverUrl,
+        links: [],
+        found: 0,
+        error: error.message
+      });
     }
-  });
+  }
   
-  return links;
+  return cdnLinks;
 }
 
-// Complete scraping flow with detailed step tracking
+// Complete scraping flow with Step 6
 async function getCompleteMovieLinks(movieUrl) {
   const steps = [];
   
   try {
-    // Step 1: Movie Details ✓
+    // Step 1: Movie Details
     steps.push({ 
       step: 1, 
       status: '⏳ pending', 
@@ -258,7 +306,7 @@ async function getCompleteMovieLinks(movieUrl) {
       throw new Error('No quality options found on movie page');
     }
     
-    // Step 2: Quality Options ✓
+    // Step 2: Quality Options
     const originalUrl = details.qualities[0].url;
     steps.push({ 
       step: 2, 
@@ -275,8 +323,8 @@ async function getCompleteMovieLinks(movieUrl) {
       throw new Error('No quality links found (1080p, 720p, 360p)');
     }
     
-    // Step 3: Download Info ✓
-    const qualityUrl = qualities[0].url; // Use 1080p by default
+    // Step 3: Download Info
+    const qualityUrl = qualities[0].url;
     steps.push({ 
       step: 3, 
       status: '⏳ pending', 
@@ -292,7 +340,7 @@ async function getCompleteMovieLinks(movieUrl) {
       throw new Error('No download page URL found');
     }
     
-    // Step 4: Server Links ✓
+    // Step 4: Server Links
     steps.push({ 
       step: 4, 
       status: '⏳ pending', 
@@ -308,18 +356,66 @@ async function getCompleteMovieLinks(movieUrl) {
       throw new Error('No server links found');
     }
     
-    // Step 5: Final CDN Links ✓
+    // Step 5: Get Download Links from First Server
     const serverUrl = servers[0].url;
     steps.push({ 
       step: 5, 
       status: '⏳ pending', 
-      message: 'Fetching final CDN download links...', 
+      message: 'Fetching download links from first server...', 
       url: serverUrl 
     });
     
-    const finalLinks = await getFinalLinks(serverUrl);
+    const $ = await fetchPage(serverUrl);
+    const downloadLinks = [];
+    
+    $('.download .dlink a, .songinfo .download .dlink a, #download-btn').each((i, el) => {
+      const text = $(el).text().trim();
+      const href = $(el).attr('href');
+      
+      if (href) {
+        downloadLinks.push({
+          id: i + 1,
+          name: text || `Download Server ${i + 1}`,
+          url: href
+        });
+      }
+    });
+    
     steps[4].status = '✅ completed';
-    steps[4].data = finalLinks;
+    steps[4].data = { downloadLinks };
+    
+    if (!downloadLinks || downloadLinks.length === 0) {
+      throw new Error('No download links found on server page');
+    }
+    
+    // Step 6: NEW - Get Actual CDN Links from Server Pages
+    steps.push({ 
+      step: 6, 
+      status: '⏳ pending', 
+      message: 'Fetching actual CDN/file URLs from server pages...', 
+      count: downloadLinks.length 
+    });
+    
+    const serverUrls = downloadLinks.map(link => link.url);
+    const cdnLinks = await getActualCDNLinks(serverUrls);
+    
+    steps[5].status = '✅ completed';
+    steps[5].data = cdnLinks;
+    
+    // Flatten all CDN links
+    const allCDNLinks = [];
+    cdnLinks.forEach((server, idx) => {
+      server.links.forEach((link, linkIdx) => {
+        allCDNLinks.push({
+          id: allCDNLinks.length + 1,
+          serverName: downloadLinks[idx]?.name || `Server ${idx + 1}`,
+          serverUrl: server.serverUrl,
+          linkText: link.text,
+          cdnUrl: link.url,
+          type: link.type
+        });
+      });
+    });
     
     return {
       success: true,
@@ -333,13 +429,13 @@ async function getCompleteMovieLinks(movieUrl) {
         poster: details.poster,
         fileSize: downloadInfo.fileSize,
         format: downloadInfo.format,
-        downloadLinks: finalLinks.download,
-        watchLinks: finalLinks.watch
+        serverLinks: downloadLinks,
+        cdnLinks: allCDNLinks,
+        totalCDNLinks: allCDNLinks.length
       }
     };
     
   } catch (error) {
-    // Mark current step as failed
     if (steps.length > 0) {
       steps[steps.length - 1].status = '❌ failed';
       steps[steps.length - 1].error = error.message;
@@ -448,18 +544,19 @@ export default async function handler(req, res) {
           data: servers
         });
 
-      case 'getFinalLinks':
+      case 'getCDNLinks':
         if (!serverUrl) {
           return res.status(400).json({ 
             success: false, 
-            error: 'serverUrl parameter is required' 
+            error: 'serverUrl parameter is required (comma-separated for multiple)' 
           });
         }
-        const finalLinks = await getFinalLinks(serverUrl);
+        const serverUrls = serverUrl.split(',').map(url => url.trim());
+        const cdnLinks = await getActualCDNLinks(serverUrls);
         return res.status(200).json({
           success: true,
-          action: 'Final CDN links fetched',
-          data: finalLinks
+          action: 'CDN links fetched',
+          data: cdnLinks
         });
 
       case 'getCompleteLinks':
@@ -483,8 +580,8 @@ export default async function handler(req, res) {
             'getQualityOptions - Get quality options (requires originalUrl)',
             'getDownloadInfo - Get download info (requires qualityUrl)',
             'getServerLinks - Get server links (requires downloadUrl)',
-            'getFinalLinks - Get final CDN links (requires serverUrl)',
-            'getCompleteLinks - Get all links in one call (requires movieUrl)'
+            'getCDNLinks - Get actual CDN links (requires serverUrl)',
+            'getCompleteLinks - Get all links including CDN (requires movieUrl)'
           ]
         });
     }
