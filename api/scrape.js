@@ -1,4 +1,4 @@
-// api/scraper.js - Get Direct MP4 & M3U8 Links for All Qualities
+// api/scraper.js - Fixed Version with Correct Quality Extraction
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 
@@ -25,12 +25,13 @@ async function fetchPage(url) {
   }
 }
 
+// Extract quality from filename or URL
 function extractQuality(text) {
   const qualityMatch = text.match(/(\d{3,4}p|4K|2K|HD|SD)/i);
   return qualityMatch ? qualityMatch[1].toUpperCase() : 'Unknown';
 }
 
-// API 1: Get Year Categories
+// Step 1: Get year categories from homepage
 async function getYearCategories() {
   const $ = await fetchPage(BASE_URL);
   const categories = [];
@@ -53,51 +54,25 @@ async function getYearCategories() {
   return categories;
 }
 
-// API 2: Get Movies from Category with Poster Images (JPG)
+// Step 2: Get movies from category page
 async function getMoviesFromCategory(categoryUrl, page = 1) {
-  const url = page > 1 ? `${categoryUrl}page/${page}/` : categoryUrl;
+  const url = page > 1 ? `${categoryUrl}?page=${page}` : categoryUrl;
   const $ = await fetchPage(url);
   const movies = [];
   
-  // Get movie links first
-  const movieLinks = [];
   $('div.f a[href*="-tamil-movie/"]').each((i, el) => {
     const text = $(el).text().trim();
     const href = $(el).attr('href');
     
     if (text && href && href.includes('-tamil-movie/')) {
-      movieLinks.push({
+      movies.push({
+        id: i + 1,
         name: text,
         url: href.startsWith('http') ? href : BASE_URL + href,
         slug: href.replace(/^\/|\/$/g, '')
       });
     }
   });
-  
-  // Fetch poster for each movie from its detail page
-  for (const movie of movieLinks) {
-    try {
-      const moviePage = await fetchPage(movie.url);
-      const posterSrc = moviePage('#movie-info img').attr('src') || 
-                       moviePage('img[src*=".jpg"], img[src*=".jpeg"], img[src*=".png"]').first().attr('src');
-      
-      movies.push({
-        id: movies.length + 1,
-        name: movie.name,
-        url: movie.url,
-        poster: posterSrc ? (posterSrc.startsWith('http') ? posterSrc : BASE_URL + posterSrc) : null,
-        slug: movie.slug
-      });
-    } catch (error) {
-      movies.push({
-        id: movies.length + 1,
-        name: movie.name,
-        url: movie.url,
-        poster: null,
-        slug: movie.slug
-      });
-    }
-  }
   
   const totalPages = parseInt($('#totalPages').text()) || 1;
   const currentPage = parseInt($('#currentPage').text()) || 1;
@@ -112,7 +87,7 @@ async function getMoviesFromCategory(categoryUrl, page = 1) {
   };
 }
 
-// Helper: Get movie details
+// Step 3: Get movie details
 async function getMovieDetails(movieUrl) {
   const $ = await fetchPage(movieUrl);
   
@@ -125,7 +100,7 @@ async function getMovieDetails(movieUrl) {
     language: '',
     synopsis: '',
     poster: '',
-    originalMovieUrl: ''
+    qualities: []
   };
   
   $('#movie-info ul.movie-info li').each((i, el) => {
@@ -144,30 +119,47 @@ async function getMovieDetails(movieUrl) {
     details.poster = posterSrc.startsWith('http') ? posterSrc : BASE_URL + posterSrc;
   }
   
-  const originalLink = $('div.f a[href*="-original-movie/"]').first();
-  if (originalLink.length) {
-    const href = originalLink.attr('href');
-    details.originalMovieUrl = href.startsWith('http') ? href : BASE_URL + href;
-  }
+  // Get original movie link
+  $('div.f a[href*="-original-movie/"]').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    
+    if (href) {
+      details.qualities.push({
+        id: i + 1,
+        name: text,
+        url: href.startsWith('http') ? href : BASE_URL + href
+      });
+    }
+  });
   
   return details;
 }
 
-// Helper: Get quality options
+// Step 4: Get quality options (360p, 720p, 1080p) - FIXED VERSION
 async function getQualityOptions(originalUrl) {
   const $ = await fetchPage(originalUrl);
   const options = [];
   
+  // FIXED: Correct selector to match the actual HTML structure
+  // The page has links like: /mithra-mandali-1080p-hd-movie/
   $('div.f a').each((i, el) => {
     const text = $(el).text().trim();
     const href = $(el).attr('href');
     
-    if (href && (href.includes('-hd-movie/') || href.includes('p-movie/') || text.match(/\d{3,4}p/i))) {
+    // Check if link contains quality indicators and is an HD movie link
+    if (href && (
+      href.includes('-hd-movie/') || 
+      href.includes('p-movie/') ||
+      text.match(/\d{3,4}p/i)
+    )) {
       const quality = extractQuality(text);
+      
       options.push({
-        quality: quality,
+        id: i + 1,
         name: text,
-        url: href.startsWith('http') ? href : BASE_URL + href
+        url: href.startsWith('http') ? href : BASE_URL + href,
+        quality: quality
       });
     }
   });
@@ -175,22 +167,26 @@ async function getQualityOptions(originalUrl) {
   return options;
 }
 
-// Helper: Get download info
+// Step 5: Get download file info
 async function getDownloadInfo(qualityUrl) {
   const $ = await fetchPage(qualityUrl);
   const info = {
     fileName: '',
     fileSize: '',
     format: '',
+    duration: '',
+    resolution: '',
     downloadPageUrl: ''
   };
   
+  // Extract file info from mv-content
   $('.mv-content .left ul li').each((i, el) => {
     const text = $(el).text();
     if (text.includes('File Size:')) info.fileSize = text.replace('File Size:', '').trim();
     if (text.includes('Download Format:')) info.format = text.replace('Download Format:', '').trim();
   });
   
+  // Get download page link
   const downloadLink = $('.mv-content .left ul li a').attr('href');
   if (downloadLink) {
     info.downloadPageUrl = downloadLink.startsWith('http') ? downloadLink : BASE_URL + downloadLink;
@@ -201,18 +197,21 @@ async function getDownloadInfo(qualityUrl) {
   return info;
 }
 
-// Helper: Get server links
+// Step 6: Get server links from download page
 async function getServerLinks(downloadPageUrl) {
   const $ = await fetchPage(downloadPageUrl);
   const servers = [];
   
+  // Get download server links
   $('.download .dlink a, .songinfo .download .dlink a').each((i, el) => {
     const text = $(el).text().trim();
     const href = $(el).attr('href');
     
     if (href && text.toLowerCase().includes('download')) {
       servers.push({
+        id: i + 1,
         name: text,
+        type: 'download',
         url: href
       });
     }
@@ -221,221 +220,366 @@ async function getServerLinks(downloadPageUrl) {
   return servers;
 }
 
-// Helper: Extract Direct MP4 and M3U8 Links
-async function extractDirectLinks(serverUrl, currentQuality) {
-  try {
-    const $ = await fetchPage(serverUrl);
-    const directLinks = [];
-    
-    // Method 1: Direct download links (MP4, MKV)
-    $('a[href*=".mp4"], a[href*=".mkv"], a[href*=".avi"]').each((i, el) => {
-      const href = $(el).attr('href');
-      if (href) {
-        directLinks.push({
-          type: href.includes('.mp4') ? 'mp4' : (href.includes('.mkv') ? 'mkv' : 'video'),
-          url: href,
-          quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
-        });
-      }
-    });
-    
-    // Method 2: M3U8 streaming links
-    $('a[href*=".m3u8"], source[src*=".m3u8"]').each((i, el) => {
-      const href = $(el).attr('href') || $(el).attr('src');
-      if (href) {
-        directLinks.push({
-          type: 'm3u8',
-          url: href,
-          quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
-        });
-      }
-    });
-    
-    // Method 3: CDN links in page content
-    $('.download a, .dlink a, #download-link, .btn-download').each((i, el) => {
-      const href = $(el).attr('href');
-      if (href && (href.includes('hotshare') || href.includes('cdn') || href.includes('storage'))) {
-        const ext = href.match(/\.(mp4|mkv|m3u8|avi)/i);
-        directLinks.push({
-          type: ext ? ext[1].toLowerCase() : 'cdn',
-          url: href,
-          quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
-        });
-      }
-    });
-    
-    // Method 4: Extract from JavaScript
-    $('script').each((i, el) => {
-      const scriptContent = $(el).html();
-      if (scriptContent) {
-        // MP4 links
-        const mp4Matches = scriptContent.match(/https?:\/\/[^\s"']+\.mp4/gi);
-        if (mp4Matches) {
-          mp4Matches.forEach(url => {
-            directLinks.push({
-              type: 'mp4',
-              url: url,
-              quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
-            });
-          });
-        }
+// Step 7: Get actual CDN links from server pages
+async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
+  const cdnLinks = [];
+  
+  for (const serverUrl of serverUrls) {
+    try {
+      const $ = await fetchPage(serverUrl);
+      
+      // Look for direct download links on the server page
+      const links = [];
+      
+      // Method 1: Check for direct download buttons/links
+      $('.download a, .dlink a, #download-link, .btn-download').each((i, el) => {
+        const href = $(el).attr('href');
+        const text = $(el).text().trim();
         
-        // M3U8 links
-        const m3u8Matches = scriptContent.match(/https?:\/\/[^\s"']+\.m3u8/gi);
-        if (m3u8Matches) {
-          m3u8Matches.forEach(url => {
-            directLinks.push({
-              type: 'm3u8',
-              url: url,
-              quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
+        if (href && (
+          href.includes('.mp4') || 
+          href.includes('.mkv') ||
+          href.includes('cdn') ||
+          href.includes('storage') ||
+          href.includes('hotshare') ||
+          href.includes('download') ||
+          text.toLowerCase().includes('download')
+        )) {
+          links.push({
+            text: text || 'Direct Download',
+            url: href,
+            type: 'cdn',
+            quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
+          });
+        }
+      });
+      
+      // Method 2: Check for embedded links in scripts
+      $('script').each((i, el) => {
+        const scriptContent = $(el).html();
+        if (scriptContent) {
+          // Look for direct file URLs in JavaScript
+          const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
+          if (urlMatches) {
+            urlMatches.forEach(url => {
+              links.push({
+                text: 'CDN Link',
+                url: url,
+                type: 'cdn',
+                quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
+              });
             });
+          }
+        }
+      });
+      
+      // Method 3: Check for meta refresh or redirect
+      const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
+      if (metaRefresh) {
+        const urlMatch = metaRefresh.match(/url=(.+)/i);
+        if (urlMatch && urlMatch[1]) {
+          links.push({
+            text: 'Redirect Link',
+            url: urlMatch[1],
+            type: 'redirect',
+            quality: extractQuality(urlMatch[1]) !== 'Unknown' ? extractQuality(urlMatch[1]) : currentQuality
           });
         }
       }
-    });
-    
-    // Remove duplicates
-    const uniqueLinks = [];
-    const seen = new Set();
-    directLinks.forEach(link => {
-      if (!seen.has(link.url)) {
-        seen.add(link.url);
-        uniqueLinks.push(link);
-      }
-    });
-    
-    return uniqueLinks;
-    
-  } catch (error) {
-    return [];
+      
+      cdnLinks.push({
+        serverUrl: serverUrl,
+        links: links,
+        found: links.length
+      });
+      
+    } catch (error) {
+      cdnLinks.push({
+        serverUrl: serverUrl,
+        links: [],
+        found: 0,
+        error: error.message
+      });
+    }
   }
+  
+  return cdnLinks;
 }
 
-// API 3: Get All Quality Direct Links (MP4 & M3U8)
-async function getMovieSummary(movieUrl) {
-  const steps = {
-    step1_movieDetails: null,
-    step2_qualityOptions: null,
-    step3_allQualitiesDirectLinks: []
-  };
+// NEW: Get ALL qualities with their CDN links
+async function getAllQualitiesWithCDN(originalUrl) {
+  const allQualitiesData = [];
   
-  try {
-    // Step 1: Get movie details
-    const details = await getMovieDetails(movieUrl);
-    steps.step1_movieDetails = details;
-    
-    if (!details.originalMovieUrl) {
-      throw new Error('No original movie URL found');
-    }
-    
-    // Step 2: Get all quality options
-    const qualities = await getQualityOptions(details.originalMovieUrl);
-    steps.step2_qualityOptions = qualities;
-    
-    if (!qualities || qualities.length === 0) {
-      throw new Error('No quality options found');
-    }
-    
-    // Step 3: Get direct links for each quality
-    for (const quality of qualities) {
-      try {
-        const downloadInfo = await getDownloadInfo(quality.url);
+  // Get all quality options
+  const qualities = await getQualityOptions(originalUrl);
+  
+  // For each quality, get its download info and CDN links
+  for (const quality of qualities) {
+    try {
+      // Get download info for this quality
+      const downloadInfo = await getDownloadInfo(quality.url);
+      
+      if (downloadInfo.downloadPageUrl) {
+        // Get server links
+        const servers = await getServerLinks(downloadInfo.downloadPageUrl);
         
-        if (downloadInfo.downloadPageUrl) {
-          const servers = await getServerLinks(downloadInfo.downloadPageUrl);
+        if (servers && servers.length > 0) {
+          // Get CDN links from first server
+          const serverUrls = [servers[0].url];
+          const cdnLinks = await getActualCDNLinks(serverUrls, quality.quality);
           
-          let allDirectLinks = [];
-          if (servers && servers.length > 0) {
-            // Extract direct links from all servers
-            for (const server of servers) {
-              const directLinks = await extractDirectLinks(server.url, quality.quality);
-              allDirectLinks = allDirectLinks.concat(directLinks);
-            }
-          }
+          // Flatten CDN links
+          const flattenedLinks = [];
+          cdnLinks.forEach(server => {
+            server.links.forEach(link => {
+              flattenedLinks.push({
+                cdnUrl: link.url,
+                linkText: link.text,
+                type: link.type
+              });
+            });
+          });
           
-          // Separate MP4 and M3U8 links
-          const mp4Links = allDirectLinks.filter(link => link.type === 'mp4' || link.type === 'mkv' || link.type === 'cdn');
-          const m3u8Links = allDirectLinks.filter(link => link.type === 'm3u8');
-          
-          steps.step3_allQualitiesDirectLinks.push({
+          allQualitiesData.push({
             quality: quality.quality,
             qualityName: quality.name,
+            qualityUrl: quality.url,
             fileSize: downloadInfo.fileSize,
             format: downloadInfo.format,
-            mp4Links: mp4Links,
-            m3u8Links: m3u8Links,
-            totalMP4: mp4Links.length,
-            totalM3U8: m3u8Links.length
+            downloadPageUrl: downloadInfo.downloadPageUrl,
+            servers: servers,
+            cdnLinks: flattenedLinks,
+            totalCDNLinks: flattenedLinks.length
           });
         }
-      } catch (error) {
-        steps.step3_allQualitiesDirectLinks.push({
-          quality: quality.quality,
-          qualityName: quality.name,
-          error: error.message
-        });
       }
+    } catch (error) {
+      allQualitiesData.push({
+        quality: quality.quality,
+        qualityName: quality.name,
+        qualityUrl: quality.url,
+        error: error.message
+      });
+    }
+  }
+  
+  return allQualitiesData;
+}
+
+// Complete scraping flow - UPDATED VERSION
+async function getCompleteMovieLinks(movieUrl, showAllSteps = false, getAllQualities = false) {
+  const steps = [];
+  
+  try {
+    // Step 1: Movie Details
+    steps.push({ 
+      step: 1, 
+      status: '⏳ pending', 
+      message: 'Fetching movie details...', 
+      url: movieUrl 
+    });
+    
+    const details = await getMovieDetails(movieUrl);
+    steps[0].status = '✅ completed';
+    steps[0].data = details;
+    
+    if (!details.qualities || details.qualities.length === 0) {
+      throw new Error('No quality options found on movie page');
     }
     
-    // Build summary with direct links
-    const allMP4Links = [];
-    const allM3U8Links = [];
+    // Step 2: Quality Options
+    const originalUrl = details.qualities[0].url;
+    steps.push({ 
+      step: 2, 
+      status: '⏳ pending', 
+      message: 'Fetching quality options (1080p, 720p, 360p)...', 
+      url: originalUrl 
+    });
     
-    steps.step3_allQualitiesDirectLinks.forEach(qualityData => {
-      if (qualityData.mp4Links) {
-        qualityData.mp4Links.forEach(link => {
-          allMP4Links.push({
-            quality: qualityData.quality,
-            type: link.type,
-            url: link.url
-          });
-        });
-      }
-      if (qualityData.m3u8Links) {
-        qualityData.m3u8Links.forEach(link => {
-          allM3U8Links.push({
-            quality: qualityData.quality,
-            type: 'm3u8',
-            url: link.url
-          });
+    const qualities = await getQualityOptions(originalUrl);
+    steps[1].status = '✅ completed';
+    steps[1].data = qualities;
+    
+    if (!qualities || qualities.length === 0) {
+      throw new Error('No quality links found (1080p, 720p, 360p)');
+    }
+    
+    // NEW: If getAllQualities flag is true, fetch CDN for all qualities
+    if (getAllQualities) {
+      steps.push({ 
+        step: 3, 
+        status: '⏳ pending', 
+        message: 'Fetching CDN links for ALL qualities...', 
+        url: originalUrl 
+      });
+      
+      const allQualitiesData = await getAllQualitiesWithCDN(originalUrl);
+      steps[2].status = '✅ completed';
+      steps[2].data = allQualitiesData;
+      
+      return {
+        success: true,
+        steps: showAllSteps ? steps : undefined,
+        summary: {
+          movie: details.title,
+          director: details.director,
+          starring: details.starring,
+          genre: details.genre,
+          rating: details.rating,
+          poster: details.poster,
+          totalQualities: allQualitiesData.length,
+          qualities: allQualitiesData
+        }
+      };
+    }
+    
+    // Original flow: Get only first quality (1080p)
+    const qualityUrl = qualities[0].url;
+    const currentQuality = qualities[0].quality || '1080P';
+    
+    steps.push({ 
+      step: 3, 
+      status: '⏳ pending', 
+      message: `Fetching download info for ${qualities[0].name}...`, 
+      url: qualityUrl 
+    });
+    
+    const downloadInfo = await getDownloadInfo(qualityUrl);
+    steps[2].status = '✅ completed';
+    steps[2].data = downloadInfo;
+    
+    if (!downloadInfo.downloadPageUrl) {
+      throw new Error('No download page URL found');
+    }
+    
+    // Step 4: Server Links
+    steps.push({ 
+      step: 4, 
+      status: '⏳ pending', 
+      message: 'Fetching server links...', 
+      url: downloadInfo.downloadPageUrl 
+    });
+    
+    const servers = await getServerLinks(downloadInfo.downloadPageUrl);
+    steps[3].status = '✅ completed';
+    steps[3].data = servers;
+    
+    if (!servers || servers.length === 0) {
+      throw new Error('No server links found');
+    }
+    
+    // Step 5: Get Download Links from First Server
+    const serverUrl = servers[0].url;
+    steps.push({ 
+      step: 5, 
+      status: '⏳ pending', 
+      message: 'Fetching download links from first server...', 
+      url: serverUrl 
+    });
+    
+    const $ = await fetchPage(serverUrl);
+    const downloadLinks = [];
+    
+    $('.download .dlink a, .songinfo .download .dlink a, #download-btn').each((i, el) => {
+      const text = $(el).text().trim();
+      const href = $(el).attr('href');
+      
+      if (href) {
+        downloadLinks.push({
+          id: i + 1,
+          name: text || `Download Server ${i + 1}`,
+          url: href
         });
       }
     });
     
-    const summary = {
-      movie: details.title,
-      director: details.director,
-      starring: details.starring,
-      genre: details.genre,
-      rating: details.rating,
-      language: details.language,
-      synopsis: details.synopsis,
-      poster: details.poster,
-      totalQualities: steps.step3_allQualitiesDirectLinks.length,
-      totalMP4Links: allMP4Links.length,
-      totalM3U8Links: allM3U8Links.length,
-      directMP4Links: allMP4Links,
-      directM3U8Links: allM3U8Links,
-      qualityWiseBreakdown: steps.step3_allQualitiesDirectLinks.map(q => ({
-        quality: q.quality,
-        fileSize: q.fileSize,
-        format: q.format,
-        totalMP4: q.totalMP4,
-        totalM3U8: q.totalM3U8
-      }))
-    };
+    steps[4].status = '✅ completed';
+    steps[4].data = { downloadLinks };
     
-    return {
-      success: true,
-      summary,
-      rawSteps: steps
-    };
+    if (!downloadLinks || downloadLinks.length === 0) {
+      throw new Error('No download links found on server page');
+    }
+    
+    // Step 6: Get Actual CDN Links from Server Pages
+    steps.push({ 
+      step: 6, 
+      status: '⏳ pending', 
+      message: 'Fetching actual CDN/file URLs from server pages...', 
+      count: downloadLinks.length 
+    });
+    
+    const serverUrls = downloadLinks.map(link => link.url);
+    const cdnLinks = await getActualCDNLinks(serverUrls, currentQuality);
+    
+    steps[5].status = '✅ completed';
+    steps[5].data = cdnLinks;
+    
+    // Flatten all CDN links with quality info
+    const allCDNLinks = [];
+    cdnLinks.forEach((server, idx) => {
+      server.links.forEach((link, linkIdx) => {
+        allCDNLinks.push({
+          id: allCDNLinks.length + 1,
+          serverName: downloadLinks[idx]?.name || `Server ${idx + 1}`,
+          serverUrl: server.serverUrl,
+          linkText: link.text,
+          cdnUrl: link.url,
+          quality: link.quality,
+          type: link.type
+        });
+      });
+    });
+    
+    // Return based on showAllSteps flag
+    if (showAllSteps) {
+      return {
+        success: true,
+        steps,
+        summary: {
+          movie: details.title,
+          director: details.director,
+          starring: details.starring,
+          genre: details.genre,
+          rating: details.rating,
+          poster: details.poster,
+          fileSize: downloadInfo.fileSize,
+          format: downloadInfo.format,
+          quality: currentQuality,
+          serverLinks: downloadLinks,
+          cdnLinks: allCDNLinks,
+          totalCDNLinks: allCDNLinks.length
+        }
+      };
+    } else {
+      // Only summary
+      return {
+        success: true,
+        summary: {
+          movie: details.title,
+          director: details.director,
+          starring: details.starring,
+          genre: details.genre,
+          rating: details.rating,
+          poster: details.poster,
+          fileSize: downloadInfo.fileSize,
+          format: downloadInfo.format,
+          quality: currentQuality,
+          cdnLinks: allCDNLinks,
+          totalCDNLinks: allCDNLinks.length
+        }
+      };
+    }
     
   } catch (error) {
+    if (steps.length > 0) {
+      steps[steps.length - 1].status = '❌ failed';
+      steps[steps.length - 1].error = error.message;
+    }
+    
     return {
       success: false,
       error: error.message,
-      rawSteps: steps
+      steps: showAllSteps ? steps : undefined
     };
   }
 }
@@ -450,20 +594,19 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  const { action, categoryUrl, movieUrl, page } = req.query;
+  const { action, categoryUrl, movieUrl, originalUrl, qualityUrl, downloadUrl, serverUrl, page, showSteps, allQualities } = req.query;
 
   try {
     switch (action) {
-      // API 1: Get Year Categories
       case 'getYears':
         const categories = await getYearCategories();
         return res.status(200).json({
           success: true,
+          action: 'Year categories fetched',
           data: categories,
           count: categories.length
         });
 
-      // API 2: Get Movies with Poster Images (JPG)
       case 'getMovies':
         if (!categoryUrl) {
           return res.status(400).json({ 
@@ -474,35 +617,127 @@ export default async function handler(req, res) {
         const result = await getMoviesFromCategory(categoryUrl, parseInt(page) || 1);
         return res.status(200).json({
           success: true,
+          action: 'Movies fetched',
           data: result.movies,
           pagination: result.pagination,
           count: result.movies.length
         });
 
-      // API 3: Get Movie Summary with ALL Direct MP4 & M3U8 Links
-      case 'getMovieSummary':
+      case 'getMovieDetails':
         if (!movieUrl) {
           return res.status(400).json({ 
             success: false, 
             error: 'movieUrl parameter is required' 
           });
         }
-        const summary = await getMovieSummary(movieUrl);
-        return res.status(200).json(summary);
+        const details = await getMovieDetails(movieUrl);
+        return res.status(200).json({
+          success: true,
+          action: 'Movie details fetched',
+          data: details
+        });
+
+      case 'getQualityOptions':
+        if (!originalUrl) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'originalUrl parameter is required' 
+          });
+        }
+        const qualities = await getQualityOptions(originalUrl);
+        return res.status(200).json({
+          success: true,
+          action: 'Quality options fetched',
+          data: qualities,
+          count: qualities.length
+        });
+
+      case 'getAllQualitiesWithCDN':
+        if (!originalUrl) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'originalUrl parameter is required' 
+          });
+        }
+        const allQualitiesData = await getAllQualitiesWithCDN(originalUrl);
+        return res.status(200).json({
+          success: true,
+          action: 'All qualities with CDN links fetched',
+          data: allQualitiesData,
+          totalQualities: allQualitiesData.length
+        });
+
+      case 'getDownloadInfo':
+        if (!qualityUrl) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'qualityUrl parameter is required' 
+          });
+        }
+        const downloadInfo = await getDownloadInfo(qualityUrl);
+        return res.status(200).json({
+          success: true,
+          action: 'Download info fetched',
+          data: downloadInfo
+        });
+
+      case 'getServerLinks':
+        if (!downloadUrl) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'downloadUrl parameter is required' 
+          });
+        }
+        const servers = await getServerLinks(downloadUrl);
+        return res.status(200).json({
+          success: true,
+          action: 'Server links fetched',
+          data: servers
+        });
+
+      case 'getCDNLinks':
+        if (!serverUrl) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'serverUrl parameter is required (comma-separated for multiple)' 
+          });
+        }
+        const serverUrls = serverUrl.split(',').map(url => url.trim());
+        const cdnLinks = await getActualCDNLinks(serverUrls);
+        return res.status(200).json({
+          success: true,
+          action: 'CDN links fetched',
+          data: cdnLinks
+        });
+
+      case 'getCompleteLinks':
+        if (!movieUrl) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'movieUrl parameter is required' 
+          });
+        }
+        const complete = await getCompleteMovieLinks(
+          movieUrl, 
+          showSteps === 'true',
+          allQualities === 'true'
+        );
+        return res.status(200).json(complete);
 
       default:
         return res.status(400).json({
           success: false,
           error: 'Invalid action parameter',
           availableActions: [
-            'getYears - Get year categories list',
-            'getMovies - Get movies with poster images (requires: categoryUrl, optional: page)',
-            'getMovieSummary - Get ALL direct MP4 & M3U8 links for all qualities (requires: movieUrl)'
-          ],
-          examples: [
-            '/api/scraper?action=getYears',
-            '/api/scraper?action=getMovies&categoryUrl=https://moviesda14.com/tamil-2024-movies/&page=1',
-            '/api/scraper?action=getMovieSummary&movieUrl=https://moviesda14.com/mithra-mandali-tamil-movie/'
+            'getYears - Get all year categories',
+            'getMovies - Get movies from a category (requires categoryUrl, optional: page)',
+            'getMovieDetails - Get movie details (requires movieUrl)',
+            'getQualityOptions - Get quality options (requires originalUrl)',
+            'getAllQualitiesWithCDN - Get ALL qualities with CDN links (requires originalUrl)',
+            'getDownloadInfo - Get download info (requires qualityUrl)',
+            'getServerLinks - Get server links (requires downloadUrl)',
+            'getCDNLinks - Get actual CDN links (requires serverUrl)',
+            'getCompleteLinks - Get all links including CDN (requires movieUrl, optional: showSteps=true, allQualities=true)'
           ]
         });
     }
@@ -510,7 +745,8 @@ export default async function handler(req, res) {
     console.error('API Error:', error);
     return res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 }
