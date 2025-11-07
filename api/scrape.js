@@ -262,65 +262,135 @@ async function getServerLinks(downloadPageUrl) {
   return servers;
 }
 
+// NEW: Get the actual MP4 CDN link from a download page
+async function getMP4LinkFromDownloadPage(downloadPageUrl, currentQuality = 'Unknown') {
+  try {
+    const $ = await fetchPage(downloadPageUrl);
+    const mp4Links = [];
+    
+    // Method 1: Direct MP4 links in href attributes
+    $('a').each((i, el) => {
+      const href = $(el).attr('href');
+      if (href && (href.endsWith('.mp4') || href.endsWith('.mkv') || href.includes('hotshare') && href.includes('.mp4'))) {
+        mp4Links.push({
+          text: $(el).text().trim() || 'Direct MP4',
+          url: href,
+          type: 'direct',
+          quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
+        });
+      }
+    });
+    
+    // Method 2: MP4 links in scripts
+    $('script').each((i, el) => {
+      const scriptContent = $(el).html();
+      if (scriptContent) {
+        // Match URLs ending with .mp4, .mkv, etc.
+        const urlMatches = scriptContent.match(/https?:\/\/[^\s"'<>]+\.(mp4|mkv|avi)/gi);
+        if (urlMatches) {
+          urlMatches.forEach(url => {
+            // Clean up the URL
+            const cleanUrl = url.replace(/[\\'"]/g, '');
+            if (!mp4Links.some(link => link.url === cleanUrl)) {
+              mp4Links.push({
+                text: 'CDN Link (from script)',
+                url: cleanUrl,
+                type: 'script',
+                quality: extractQuality(cleanUrl) !== 'Unknown' ? extractQuality(cleanUrl) : currentQuality
+              });
+            }
+          });
+        }
+      }
+    });
+    
+    // Method 3: Meta refresh redirect
+    const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
+    if (metaRefresh) {
+      const urlMatch = metaRefresh.match(/url=(.+)/i);
+      if (urlMatch && urlMatch[1]) {
+        const redirectUrl = urlMatch[1].trim();
+        if (redirectUrl.endsWith('.mp4') || redirectUrl.endsWith('.mkv')) {
+          mp4Links.push({
+            text: 'Redirect MP4',
+            url: redirectUrl,
+            type: 'redirect',
+            quality: extractQuality(redirectUrl) !== 'Unknown' ? extractQuality(redirectUrl) : currentQuality
+          });
+        }
+      }
+    }
+    
+    // Method 4: Check for download buttons with onclick or data attributes
+    $('button, .download-btn, #download-link').each((i, el) => {
+      const onclick = $(el).attr('onclick');
+      const dataUrl = $(el).attr('data-url') || $(el).attr('data-link');
+      
+      if (onclick) {
+        const urlMatch = onclick.match(/https?:\/\/[^\s"']+\.(mp4|mkv)/i);
+        if (urlMatch) {
+          mp4Links.push({
+            text: 'Button Link',
+            url: urlMatch[0],
+            type: 'onclick',
+            quality: extractQuality(urlMatch[0]) !== 'Unknown' ? extractQuality(urlMatch[0]) : currentQuality
+          });
+        }
+      }
+      
+      if (dataUrl && (dataUrl.endsWith('.mp4') || dataUrl.endsWith('.mkv'))) {
+        mp4Links.push({
+          text: 'Data Link',
+          url: dataUrl,
+          type: 'data-attribute',
+          quality: extractQuality(dataUrl) !== 'Unknown' ? extractQuality(dataUrl) : currentQuality
+        });
+      }
+    });
+    
+    return mp4Links;
+  } catch (error) {
+    return [];
+  }
+}
+
 async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
   const cdnLinks = [];
   
   for (const serverUrl of serverUrls) {
     try {
       const $ = await fetchPage(serverUrl);
-      const links = [];
+      const intermediateLinks = [];
       
+      // Get intermediate download page links
       $('.download a, .dlink a, #download-link, .btn-download').each((i, el) => {
         const href = $(el).attr('href');
         const text = $(el).text().trim();
-        if (href && (
-          href.includes('.mp4') || href.includes('.mkv') || href.includes('cdn') ||
-          href.includes('storage') || href.includes('hotshare') || href.includes('download') ||
-          text.toLowerCase().includes('download')
-        )) {
-          links.push({
-            text: text || 'Direct Download',
-            url: href,
-            type: 'cdn',
-            quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
+        if (href && text.toLowerCase().includes('download')) {
+          intermediateLinks.push({
+            text: text,
+            url: href
           });
         }
       });
       
-      $('script').each((i, el) => {
-        const scriptContent = $(el).html();
-        if (scriptContent) {
-          const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
-          if (urlMatches) {
-            urlMatches.forEach(url => {
-              links.push({
-                text: 'CDN Link',
-                url: url,
-                type: 'cdn',
-                quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
-              });
-            });
-          }
-        }
-      });
-      
-      const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
-      if (metaRefresh) {
-        const urlMatch = metaRefresh.match(/url=(.+)/i);
-        if (urlMatch && urlMatch[1]) {
-          links.push({
-            text: 'Redirect Link',
-            url: urlMatch[1],
-            type: 'redirect',
-            quality: extractQuality(urlMatch[1]) !== 'Unknown' ? extractQuality(urlMatch[1]) : currentQuality
+      // Now fetch actual MP4 links from each intermediate page
+      const mp4Links = [];
+      for (const intermediateLink of intermediateLinks) {
+        const mp4Results = await getMP4LinkFromDownloadPage(intermediateLink.url, currentQuality);
+        mp4Results.forEach(mp4 => {
+          mp4Links.push({
+            intermediateServer: intermediateLink.text,
+            intermediateUrl: intermediateLink.url,
+            ...mp4
           });
-        }
+        });
       }
       
       cdnLinks.push({
         serverUrl: serverUrl,
-        links: links,
-        found: links.length
+        links: mp4Links,
+        found: mp4Links.length
       });
     } catch (error) {
       cdnLinks.push({
@@ -352,10 +422,11 @@ async function getAllQualitiesWithLinks(movieUrl) {
           server.links.forEach(link => {
             episodeCDNLinks.push({
               id: episodeCDNLinks.length + 1,
-              serverName: servers[idx]?.name || `Server ${idx + 1}`,
+              serverName: link.intermediateServer || servers[idx]?.name || `Server ${idx + 1}`,
               serverUrl: server.serverUrl,
+              intermediateUrl: link.intermediateUrl || server.serverUrl,
               linkText: link.text,
-              cdnUrl: link.url,
+              mp4Url: link.url,
               quality: link.quality,
               type: link.type
             });
@@ -405,10 +476,11 @@ async function getAllQualitiesWithLinks(movieUrl) {
           server.links.forEach(link => {
             qualityCDNLinks.push({
               id: qualityCDNLinks.length + 1,
-              serverName: servers[idx]?.name || `Server ${idx + 1}`,
+              serverName: link.intermediateServer || servers[idx]?.name || `Server ${idx + 1}`,
               serverUrl: server.serverUrl,
+              intermediateUrl: link.intermediateUrl || server.serverUrl,
               linkText: link.text,
-              cdnUrl: link.url,
+              mp4Url: link.url,
               quality: link.quality,
               type: link.type
             });
@@ -489,10 +561,11 @@ async function getCompleteMovieLinks(movieUrl, showAllSteps = false) {
         server.links.forEach(link => {
           allCDNLinks.push({
             id: allCDNLinks.length + 1,
-            serverName: servers[idx]?.name || `Server ${idx + 1}`,
+            serverName: link.intermediateServer || servers[idx]?.name || `Server ${idx + 1}`,
             serverUrl: server.serverUrl,
+            intermediateUrl: link.intermediateUrl || server.serverUrl,
             linkText: link.text,
-            cdnUrl: link.url,
+            mp4Url: link.url,
             quality: link.quality,
             type: link.type
           });
@@ -557,10 +630,11 @@ async function getCompleteMovieLinks(movieUrl, showAllSteps = false) {
         server.links.forEach(link => {
           allCDNLinks.push({
             id: allCDNLinks.length + 1,
-            serverName: servers[idx]?.name || `Server ${idx + 1}`,
+            serverName: link.intermediateServer || servers[idx]?.name || `Server ${idx + 1}`,
             serverUrl: server.serverUrl,
+            intermediateUrl: link.intermediateUrl || server.serverUrl,
             linkText: link.text,
-            cdnUrl: link.url,
+            mp4Url: link.url,
             quality: link.quality,
             type: link.type
           });
