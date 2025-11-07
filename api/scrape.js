@@ -286,31 +286,49 @@ async function getServerLinks(downloadPageUrl) {
   return servers;
 }
 
-// Step 7: Get actual CDN links from server pages
+// Step 7: Get actual MP4/CDN links from server pages (goes deeper into download pages)
 async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
   const cdnLinks = [];
+  
   for (const serverUrl of serverUrls) {
     try {
       const $ = await fetchPage(serverUrl);
       const links = [];
+      const intermediateLinkPages = [];
       
+      // First, collect all potential download page links
       $('.download a, .dlink a, #download-link, .btn-download').each((i, el) => {
         const href = $(el).attr('href');
         const text = $(el).text().trim();
-        if (href && (
-          href.includes('.mp4') || href.includes('.mkv') || href.includes('cdn') ||
-          href.includes('storage') || href.includes('hotshare') || href.includes('download') ||
-          text.toLowerCase().includes('download')
-        )) {
-          links.push({
-            text: text || 'Direct Download',
-            url: href,
-            type: 'cdn',
-            quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
-          });
+        
+        if (href) {
+          // Check if it's a direct MP4/MKV link
+          if (href.includes('.mp4') || href.includes('.mkv') || href.includes('.avi')) {
+            links.push({
+              text: text || 'Direct Download',
+              url: href,
+              type: 'direct',
+              quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
+            });
+          }
+          // Check if it's an intermediate download page (hotshare, cdn, storage, etc.)
+          else if (
+            href.includes('hotshare') || 
+            href.includes('cdn') || 
+            href.includes('storage') || 
+            href.includes('download') ||
+            href.includes('moviespage.site') ||
+            text.toLowerCase().includes('download')
+          ) {
+            intermediateLinkPages.push({
+              url: href,
+              text: text || 'Download Link'
+            });
+          }
         }
       });
       
+      // Check scripts for direct MP4 links
       $('script').each((i, el) => {
         const scriptContent = $(el).html();
         if (scriptContent) {
@@ -318,9 +336,9 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
           if (urlMatches) {
             urlMatches.forEach(url => {
               links.push({
-                text: 'CDN Link',
+                text: 'Script CDN Link',
                 url: url,
-                type: 'cdn',
+                type: 'script',
                 quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
               });
             });
@@ -328,24 +346,125 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
         }
       });
       
+      // Check meta refresh redirects
       const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
       if (metaRefresh) {
         const urlMatch = metaRefresh.match(/url=(.+)/i);
         if (urlMatch && urlMatch[1]) {
-          links.push({
-            text: 'Redirect Link',
-            url: urlMatch[1],
-            type: 'redirect',
-            quality: extractQuality(urlMatch[1]) !== 'Unknown' ? extractQuality(urlMatch[1]) : currentQuality
+          const redirectUrl = urlMatch[1];
+          if (redirectUrl.includes('.mp4') || redirectUrl.includes('.mkv')) {
+            links.push({
+              text: 'Meta Redirect',
+              url: redirectUrl,
+              type: 'redirect',
+              quality: extractQuality(redirectUrl) !== 'Unknown' ? extractQuality(redirectUrl) : currentQuality
+            });
+          } else {
+            intermediateLinkPages.push({
+              url: redirectUrl,
+              text: 'Meta Redirect Page'
+            });
+          }
+        }
+      }
+      
+      // NOW: Go deeper into intermediate pages to find actual MP4 links
+      for (const intermediatePage of intermediateLinkPages) {
+        try {
+          const $inner = await fetchPage(intermediatePage.url);
+          
+          // Look for direct download links in the inner page
+          $inner('a').each((i, el) => {
+            const href = $inner(el).attr('href');
+            const text = $inner(el).text().trim();
+            
+            if (href && (href.includes('.mp4') || href.includes('.mkv') || href.includes('.avi') || 
+                         href.includes('hotshare.link') || href.includes('s0') || 
+                         text.toLowerCase().includes('download'))) {
+              
+              // Check if this is a hotshare-style CDN link
+              if (href.includes('hotshare') || /s\d+\./.test(href)) {
+                links.push({
+                  text: intermediatePage.text + ' - ' + (text || 'CDN Link'),
+                  url: href,
+                  type: 'cdn',
+                  intermediateUrl: intermediatePage.url,
+                  quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
+                });
+              } else if (href.includes('.mp4') || href.includes('.mkv')) {
+                links.push({
+                  text: intermediatePage.text + ' - Direct',
+                  url: href,
+                  type: 'direct',
+                  intermediateUrl: intermediatePage.url,
+                  quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
+                });
+              }
+            }
           });
+          
+          // Check scripts in inner page
+          $inner('script').each((i, el) => {
+            const scriptContent = $inner(el).html();
+            if (scriptContent) {
+              // Look for direct MP4/MKV URLs
+              const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
+              if (urlMatches) {
+                urlMatches.forEach(url => {
+                  links.push({
+                    text: intermediatePage.text + ' - Script',
+                    url: url,
+                    type: 'script',
+                    intermediateUrl: intermediatePage.url,
+                    quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
+                  });
+                });
+              }
+              
+              // Look for hotshare-style links in scripts
+              const hotshareMatches = scriptContent.match(/https?:\/\/s\d+\.hotshare\.link\/[^\s"']+/gi);
+              if (hotshareMatches) {
+                hotshareMatches.forEach(url => {
+                  links.push({
+                    text: intermediatePage.text + ' - Hotshare CDN',
+                    url: url,
+                    type: 'cdn',
+                    intermediateUrl: intermediatePage.url,
+                    quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
+                  });
+                });
+              }
+            }
+          });
+          
+          // Check meta refresh in inner page
+          const innerMetaRefresh = $inner('meta[http-equiv="refresh"]').attr('content');
+          if (innerMetaRefresh) {
+            const urlMatch = innerMetaRefresh.match(/url=(.+)/i);
+            if (urlMatch && urlMatch[1]) {
+              links.push({
+                text: intermediatePage.text + ' - Meta Redirect',
+                url: urlMatch[1],
+                type: 'redirect',
+                intermediateUrl: intermediatePage.url,
+                quality: extractQuality(urlMatch[1]) !== 'Unknown' ? extractQuality(urlMatch[1]) : currentQuality
+              });
+            }
+          }
+          
+        } catch (innerError) {
+          // If we can't fetch the intermediate page, just skip it
+          console.error(`Failed to fetch intermediate page ${intermediatePage.url}:`, innerError.message);
         }
       }
       
       cdnLinks.push({
         serverUrl: serverUrl,
         links: links,
-        found: links.length
+        found: links.length,
+        intermediatePages: intermediateLinkPages.length
       });
+      
     } catch (error) {
       cdnLinks.push({
         serverUrl: serverUrl,
@@ -355,6 +474,7 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
       });
     }
   }
+  
   return cdnLinks;
 }
 
