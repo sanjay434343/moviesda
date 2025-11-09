@@ -284,30 +284,10 @@ async function getDownloadInfo(qualityUrl) {
     format: '',
     duration: '',
     resolution: '',
-    downloadPageUrl: '',
-    directMp4Links: [] // NEW: Store direct MP4 links if found
+    downloadPageUrl: ''
   };
 
-  // Check if this page already has direct MP4 links (final download page)
-  const hasMp4Links = $('a[href*=".mp4"], a[href*="uptoweb"], a[href*="hotshare"]').length > 0;
-  
-  if (hasMp4Links) {
-    // This is already the final download page with MP4 links!
-    $('a').each((i, el) => {
-      const href = $(el).attr('href');
-      const text = $(el).text().trim();
-      
-      if (href && (href.includes('.mp4') || href.includes('uptoweb') || href.includes('hotshare'))) {
-        info.directMp4Links.push({
-          url: href,
-          text: text || 'Direct Download',
-          type: href.includes('.mp4') ? 'direct-mp4' : 'cdn'
-        });
-      }
-    });
-  }
-
-  // Get file info
+  // For download pages with songinfo class
   $('.songinfo .details, .mv-content .left ul li').each((i, el) => {
     const text = $(el).text();
     if (text.includes('File Size:')) info.fileSize = text.replace('File Size:', '').trim();
@@ -320,12 +300,10 @@ async function getDownloadInfo(qualityUrl) {
     }
   });
 
-  // Get download page URL (if not already at final page)
-  if (info.directMp4Links.length === 0) {
-    const downloadLink = $('.download .dlink a, .songinfo .download .dlink a, .mv-content .left ul li a').first().attr('href');
-    if (downloadLink) {
-      info.downloadPageUrl = downloadLink.startsWith('http') ? downloadLink : BASE_URL + downloadLink;
-    }
+  // Get download page URL
+  const downloadLink = $('.download .dlink a, .songinfo .download .dlink a, .mv-content .left ul li a').first().attr('href');
+  if (downloadLink) {
+    info.downloadPageUrl = downloadLink.startsWith('http') ? downloadLink : BASE_URL + downloadLink;
   }
   
   info.fileName = $('.songinfo .details strong, .mv-content .left ul li strong').first().text().trim() || 
