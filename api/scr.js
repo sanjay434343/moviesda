@@ -166,32 +166,11 @@ async function getMovieDetails(movieUrl) {
   details.synopsis = $('.movie-synopsis').text().replace('Synopsis:', '').trim();
   details.poster = getValidPosterFromPicture($, '#movie-info');
 
-  // Check if page has episodes (web series with episode list)
+  // CRITICAL: Check if page has episodes with mv-content structure FIRST
   const hasEpisodeList = $('div.f .mv-content').length > 0;
   
-  // Check if it's just links to seasons (pre-DVD style or season selector)
-  const seasonLinks = [];
-  $('div.f a').each((i, el) => {
-    const text = $(el).text().trim();
-    const href = $(el).attr('href');
-    if (href && (/season/i.test(text) || /season/i.test(href))) {
-      seasonLinks.push({
-        id: seasonLinks.length + 1,
-        name: text,
-        url: href.startsWith('http') ? href : BASE_URL + href
-      });
-    }
-  });
-
-  if (seasonLinks.length > 0) {
-    // This is a season selector page
-    details.contentType = 'webseries-selector';
-    details.seasons = seasonLinks;
-    return details;
-  }
-
   if (hasEpisodeList) {
-    // This is a web series with episode list
+    // This is a web series with episode list (has .mv-content divs)
     details.contentType = 'webseries';
     
     // Extract episodes from mv-content divs
@@ -214,6 +193,31 @@ async function getMovieDetails(movieUrl) {
         });
       }
     });
+    return details;
+  }
+  
+  // Check if it's a season selector page (has links with "season" in them, but NO mv-content)
+  const seasonLinks = [];
+  $('div.f a').each((i, el) => {
+    const text = $(el).text().trim();
+    const href = $(el).attr('href');
+    // Only consider it a season link if it has "season" or "web-series" in the URL/text
+    // AND is not a download page
+    if (href && 
+        (/season.*web-series|web-series.*season/i.test(href) || /season\s+\d+/i.test(text)) &&
+        !/download\//i.test(href)) {
+      seasonLinks.push({
+        id: seasonLinks.length + 1,
+        name: text,
+        url: href.startsWith('http') ? href : BASE_URL + href
+      });
+    }
+  });
+
+  if (seasonLinks.length > 0) {
+    // This is a season selector page (links to season pages, not episodes)
+    details.contentType = 'webseries-selector';
+    details.seasons = seasonLinks;
     return details;
   }
 
@@ -280,10 +284,30 @@ async function getDownloadInfo(qualityUrl) {
     format: '',
     duration: '',
     resolution: '',
-    downloadPageUrl: ''
+    downloadPageUrl: '',
+    directMp4Links: [] // NEW: Store direct MP4 links if found
   };
 
-  // For download pages with songinfo class
+  // Check if this page already has direct MP4 links (final download page)
+  const hasMp4Links = $('a[href*=".mp4"], a[href*="uptoweb"], a[href*="hotshare"]').length > 0;
+  
+  if (hasMp4Links) {
+    // This is already the final download page with MP4 links!
+    $('a').each((i, el) => {
+      const href = $(el).attr('href');
+      const text = $(el).text().trim();
+      
+      if (href && (href.includes('.mp4') || href.includes('uptoweb') || href.includes('hotshare'))) {
+        info.directMp4Links.push({
+          url: href,
+          text: text || 'Direct Download',
+          type: href.includes('.mp4') ? 'direct-mp4' : 'cdn'
+        });
+      }
+    });
+  }
+
+  // Get file info
   $('.songinfo .details, .mv-content .left ul li').each((i, el) => {
     const text = $(el).text();
     if (text.includes('File Size:')) info.fileSize = text.replace('File Size:', '').trim();
@@ -296,10 +320,12 @@ async function getDownloadInfo(qualityUrl) {
     }
   });
 
-  // Get download page URL
-  const downloadLink = $('.download .dlink a, .songinfo .download .dlink a, .mv-content .left ul li a').first().attr('href');
-  if (downloadLink) {
-    info.downloadPageUrl = downloadLink.startsWith('http') ? downloadLink : BASE_URL + downloadLink;
+  // Get download page URL (if not already at final page)
+  if (info.directMp4Links.length === 0) {
+    const downloadLink = $('.download .dlink a, .songinfo .download .dlink a, .mv-content .left ul li a').first().attr('href');
+    if (downloadLink) {
+      info.downloadPageUrl = downloadLink.startsWith('http') ? downloadLink : BASE_URL + downloadLink;
+    }
   }
   
   info.fileName = $('.songinfo .details strong, .mv-content .left ul li strong').first().text().trim() || 
@@ -329,17 +355,19 @@ async function getServerLinks(downloadPageUrl) {
   return servers;
 }
 
-// Step 7: Get actual MP4/CDN links - ENHANCED TO GO DEEPER
+// Step 7: Get actual MP4/CDN links - OPTIMIZED FOR SERVERLESS
 async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
   const cdnLinks = [];
+  const maxServers = Math.min(serverUrls.length, 2); // Limit to 2 servers to avoid timeout
   
-  for (const serverUrl of serverUrls) {
+  for (let i = 0; i < maxServers; i++) {
+    const serverUrl = serverUrls[i];
     try {
       const $ = await fetchPage(serverUrl);
       const links = [];
       
       // Direct MP4/MKV links
-      $('.download .dlink a, .dlink a, a[href*=".mp4"], a[href*=".mkv"]').each((i, el) => {
+      $('.download .dlink a, .dlink a, a[href*=".mp4"], a[href*=".mkv"]').each((idx, el) => {
         const href = $(el).attr('href');
         const text = $(el).text().trim();
         
@@ -351,7 +379,6 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
             quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
           });
         } else if (href && (href.includes('download') || href.includes('uptoweb') || href.includes('hotshare') || text.toLowerCase().includes('download'))) {
-          // These are intermediate download pages - we'll fetch them
           links.push({
             text: text || 'Download Link',
             url: href,
@@ -363,12 +390,12 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
       });
       
       // Check scripts for MP4 URLs
-      $('script').each((i, el) => {
+      $('script').each((idx, el) => {
         const scriptContent = $(el).html();
         if (scriptContent) {
           const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
           if (urlMatches) {
-            urlMatches.forEach(url => {
+            urlMatches.slice(0, 3).forEach(url => { // Limit to 3 matches
               links.push({
                 text: 'Script CDN Link',
                 url: url,
@@ -380,60 +407,59 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
         }
       });
       
-      // NOW: Go deeper into intermediate pages
+      // Deep fetch only first intermediate link to save time
       const deepLinks = [];
-      for (const link of links) {
-        if (link.needsDeepFetch) {
-          try {
-            const $inner = await fetchPage(link.url);
-            
-            // Look for direct MP4 links
-            $inner('a').each((i, el) => {
-              const href = $inner(el).attr('href');
-              if (href && (href.includes('.mp4') || href.includes('.mkv') || href.includes('.avi'))) {
-                deepLinks.push({
-                  text: link.text + ' - Final MP4',
-                  url: href,
-                  type: 'final-mp4',
-                  intermediateUrl: link.url,
-                  quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
-                });
-              } else if (href && (href.includes('uptoweb') || href.includes('hotshare') || href.includes('big3.'))) {
-                deepLinks.push({
-                  text: link.text + ' - CDN',
-                  url: href,
-                  type: 'cdn-link',
-                  intermediateUrl: link.url,
-                  quality: currentQuality
-                });
-              }
-            });
-            
-            // Check scripts in intermediate page
-            $inner('script').each((i, el) => {
-              const scriptContent = $inner(el).html();
-              if (scriptContent) {
-                const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
-                if (urlMatches) {
-                  urlMatches.forEach(url => {
-                    deepLinks.push({
-                      text: link.text + ' - Script MP4',
-                      url: url,
-                      type: 'script-mp4',
-                      intermediateUrl: link.url,
-                      quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
-                    });
+      const intermediateLinks = links.filter(l => l.needsDeepFetch).slice(0, 1);
+      
+      for (const link of intermediateLinks) {
+        try {
+          const $inner = await fetchPage(link.url);
+          
+          // Look for direct MP4 links
+          $inner('a').each((idx, el) => {
+            const href = $inner(el).attr('href');
+            if (href && (href.includes('.mp4') || href.includes('.mkv') || href.includes('.avi'))) {
+              deepLinks.push({
+                text: link.text + ' - Final MP4',
+                url: href,
+                type: 'final-mp4',
+                intermediateUrl: link.url,
+                quality: extractQuality(href) !== 'Unknown' ? extractQuality(href) : currentQuality
+              });
+            } else if (href && (href.includes('uptoweb') || href.includes('hotshare') || href.includes('big3.'))) {
+              deepLinks.push({
+                text: link.text + ' - CDN',
+                url: href,
+                type: 'cdn-link',
+                intermediateUrl: link.url,
+                quality: currentQuality
+              });
+            }
+          });
+          
+          // Check scripts in intermediate page
+          $inner('script').each((idx, el) => {
+            const scriptContent = $inner(el).html();
+            if (scriptContent) {
+              const urlMatches = scriptContent.match(/https?:\/\/[^\s"']+\.(mp4|mkv|avi)/gi);
+              if (urlMatches) {
+                urlMatches.slice(0, 2).forEach(url => {
+                  deepLinks.push({
+                    text: link.text + ' - Script MP4',
+                    url: url,
+                    type: 'script-mp4',
+                    intermediateUrl: link.url,
+                    quality: extractQuality(url) !== 'Unknown' ? extractQuality(url) : currentQuality
                   });
-                }
+                });
               }
-            });
-          } catch (err) {
-            console.error(`Failed to fetch intermediate page: ${err.message}`);
-          }
+            }
+          });
+        } catch (err) {
+          console.error(`Failed to fetch intermediate page: ${err.message}`);
         }
       }
       
-      // Merge all links
       const allLinks = [...links.filter(l => !l.needsDeepFetch), ...deepLinks];
       
       cdnLinks.push({
@@ -455,11 +481,12 @@ async function getActualCDNLinks(serverUrls, currentQuality = 'Unknown') {
   return cdnLinks;
 }
 
-// Process all qualities
+// Process all qualities - OPTIMIZED FOR SERVERLESS
 async function processAllQualities(qualities, steps, showRaw) {
   const allQualitiesData = [];
+  const maxQualities = Math.min(qualities.length, 5); // Limit to 5 items to avoid timeout
   
-  for (let i = 0; i < qualities.length; i++) {
+  for (let i = 0; i < maxQualities; i++) {
     const quality = qualities[i];
     const qualityData = {
       qualityName: quality.name,
@@ -557,6 +584,15 @@ async function processAllQualities(qualities, steps, showRaw) {
     }
     
     allQualitiesData.push(qualityData);
+  }
+  
+  // Add notice if we limited the results
+  if (qualities.length > maxQualities) {
+    allQualitiesData.push({
+      notice: `Showing first ${maxQualities} of ${qualities.length} items (serverless limit)`,
+      totalAvailable: qualities.length,
+      shown: maxQualities
+    });
   }
   
   return allQualitiesData;
