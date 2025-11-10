@@ -8,15 +8,50 @@ function getAbsoluteUrl(baseURL, url) {
   return `${baseURL}/${url}`;
 }
 
+// NEW: Fetch Wikipedia extract for a movie
+async function fetchWikiExtract(movieName) {
+  try {
+    // Step 1: Search Wikipedia for the movie
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(movieName)}&format=json&origin=*`;
+    const searchResp = await axios.get(searchUrl, { timeout: 10000 });
+    
+    if (searchResp.status === 200 && searchResp.data?.query?.search?.length > 0) {
+      const topTitle = searchResp.data.query.search[0].title;
+      
+      // Step 2: Get summary from the top result
+      const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`;
+      const summaryResp = await axios.get(summaryUrl, { timeout: 10000 });
+      
+      if (summaryResp.status === 200 && summaryResp.data?.extract) {
+        return {
+          extract: summaryResp.data.extract,
+          title: summaryResp.data.title,
+          url: summaryResp.data.content_urls?.desktop?.page || null,
+          thumbnail: summaryResp.data.thumbnail?.source || null
+        };
+      }
+    }
+  } catch (error) {
+    console.error('Wikipedia fetch error:', error.message);
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const { url } = req.query;
+  const { url, wiki, includeWiki } = req.query;
+  
   if (!url)
     return res.status(400).json({ error: "Missing ?url parameter" });
+
+  // Check if Wikipedia should be included (default: false for list view to avoid slowdown)
+  // Can be enabled with ?wiki=true or ?includeWiki=true
+  const shouldIncludeWiki = wiki === 'true' || includeWiki === 'true';
 
   const baseURL = "https://moviesda14.com";
 
@@ -35,14 +70,12 @@ export default async function handler(req, res) {
     try {
       const html = await fetchHtml(movieUrl);
       const $ = cheerio.load(html);
-
       let img =
         $('meta[property="og:image"]').attr("content") ||
         $('meta[name="og:image"]').attr("content") ||
         $(".albumcover img").attr("src") ||
         $(".poster img").attr("src") ||
         $("img[src*='/uploads/']").first().attr("src");
-
       if (!img) return null;
       if (img.startsWith("/")) img = `${baseURL}${img}`;
       if (!img.match(/\.(jpg|jpeg|png|webp)$/i)) return null;
@@ -69,7 +102,6 @@ export default async function handler(req, res) {
         });
         return last;
       })();
-
     const nextPage = $(".pagination a.next").attr("href");
     const prevPage = $(".pagination a.prev").attr("href");
 
@@ -82,6 +114,7 @@ export default async function handler(req, res) {
     };
 
     const items = $("div.f");
+    
     const movies = await Promise.all(
       items.map(async (i, el) => {
         const title = $(el).find("a").text().trim();
@@ -93,7 +126,22 @@ export default async function handler(req, res) {
         if (!(poster && poster.match(/\.(jpg|jpeg|png|webp)$/i))) {
           poster = `${baseURL}/img/dir.gif`;
         }
-        return { title, url: href, img: poster };
+
+        const movieData = { 
+          title, 
+          url: href, 
+          img: poster 
+        };
+
+        // Fetch Wikipedia data if enabled
+        if (shouldIncludeWiki) {
+          const wikiData = await fetchWikiExtract(title);
+          if (wikiData) {
+            movieData.wikipedia = wikiData;
+          }
+        }
+
+        return movieData;
       }).get()
     ).then(resArr => resArr.filter(Boolean));
 
@@ -101,6 +149,7 @@ export default async function handler(req, res) {
       source: decodeURIComponent(url),
       total: movies.length,
       pagination,
+      wikipediaEnabled: shouldIncludeWiki,
       results: movies,
     });
   } catch (err) {
