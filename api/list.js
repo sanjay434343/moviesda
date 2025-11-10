@@ -1,6 +1,9 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
 
+// Helper to delay between requests
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 function getAbsoluteUrl(baseURL, url) {
   if (!url) return null;
   if (url.startsWith("http")) return url;
@@ -13,29 +16,50 @@ async function fetchWikiExtract(movieName) {
   try {
     console.log(`Fetching Wikipedia for: ${movieName}`);
     
-    // Step 1: Search Wikipedia for the movie
-    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(movieName)}&format=json&origin=*`;
-    const searchResp = await axios.get(searchUrl, { timeout: 10000 });
+    // Clean the movie name - remove year and extra info
+    let cleanName = movieName.replace(/\s*\(\d{4}\)\s*$/g, '').trim();
     
-    if (searchResp.status === 200 && searchResp.data?.query?.search?.length > 0) {
-      const topTitle = searchResp.data.query.search[0].title;
-      console.log(`Found Wikipedia title: ${topTitle}`);
-      
-      // Step 2: Get summary from the top result
-      const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`;
-      const summaryResp = await axios.get(summaryUrl, { timeout: 10000 });
-      
-      if (summaryResp.status === 200 && summaryResp.data?.extract) {
-        console.log(`Successfully fetched Wikipedia summary for: ${topTitle}`);
-        return {
-          description: summaryResp.data.extract,
-          wikiTitle: summaryResp.data.title,
-          wikiUrl: summaryResp.data.content_urls?.desktop?.page || null,
-          wikiThumbnail: summaryResp.data.thumbnail?.source || null
-        };
+    // Try multiple search variations
+    const searchVariations = [
+      cleanName, // Without year
+      movieName, // Original with year
+      `${cleanName} film`, // Add "film" keyword
+      `${cleanName} movie`, // Add "movie" keyword
+      `${cleanName} Tamil film` // Add language context
+    ];
+    
+    for (const searchTerm of searchVariations) {
+      try {
+        // Step 1: Search Wikipedia for the movie
+        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(searchTerm)}&format=json&origin=*`;
+        const searchResp = await axios.get(searchUrl, { timeout: 10000 });
+        
+        if (searchResp.status === 200 && searchResp.data?.query?.search?.length > 0) {
+          const topTitle = searchResp.data.query.search[0].title;
+          console.log(`Found Wikipedia title for "${searchTerm}": ${topTitle}`);
+          
+          // Step 2: Get summary from the top result
+          const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`;
+          const summaryResp = await axios.get(summaryUrl, { timeout: 10000 });
+          
+          if (summaryResp.status === 200 && summaryResp.data?.extract) {
+            console.log(`✅ Successfully fetched Wikipedia summary for: ${topTitle}`);
+            return {
+              description: summaryResp.data.extract,
+              wikiTitle: summaryResp.data.title,
+              wikiUrl: summaryResp.data.content_urls?.desktop?.page || null,
+              wikiThumbnail: summaryResp.data.thumbnail?.source || null,
+              searchTerm: searchTerm // Track which search term worked
+            };
+          }
+        }
+      } catch (error) {
+        console.log(`Search variation "${searchTerm}" failed: ${error.message}`);
+        // Continue to next variation
       }
     }
-    console.log(`No Wikipedia data found for: ${movieName}`);
+    
+    console.log(`❌ No Wikipedia data found for: ${movieName} (tried ${searchVariations.length} variations)`);
   } catch (error) {
     console.error(`Wikipedia fetch error for "${movieName}":`, error.message);
   }
