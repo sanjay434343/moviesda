@@ -11,28 +11,33 @@ function getAbsoluteUrl(baseURL, url) {
 // NEW: Fetch Wikipedia extract for a movie
 async function fetchWikiExtract(movieName) {
   try {
+    console.log(`Fetching Wikipedia for: ${movieName}`);
+    
     // Step 1: Search Wikipedia for the movie
     const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(movieName)}&format=json&origin=*`;
     const searchResp = await axios.get(searchUrl, { timeout: 10000 });
     
     if (searchResp.status === 200 && searchResp.data?.query?.search?.length > 0) {
       const topTitle = searchResp.data.query.search[0].title;
+      console.log(`Found Wikipedia title: ${topTitle}`);
       
       // Step 2: Get summary from the top result
       const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`;
       const summaryResp = await axios.get(summaryUrl, { timeout: 10000 });
       
       if (summaryResp.status === 200 && summaryResp.data?.extract) {
+        console.log(`Successfully fetched Wikipedia summary for: ${topTitle}`);
         return {
-          extract: summaryResp.data.extract,
-          title: summaryResp.data.title,
-          url: summaryResp.data.content_urls?.desktop?.page || null,
-          thumbnail: summaryResp.data.thumbnail?.source || null
+          description: summaryResp.data.extract,
+          wikiTitle: summaryResp.data.title,
+          wikiUrl: summaryResp.data.content_urls?.desktop?.page || null,
+          wikiThumbnail: summaryResp.data.thumbnail?.source || null
         };
       }
     }
+    console.log(`No Wikipedia data found for: ${movieName}`);
   } catch (error) {
-    console.error('Wikipedia fetch error:', error.message);
+    console.error(`Wikipedia fetch error for "${movieName}":`, error.message);
   }
   return null;
 }
@@ -130,14 +135,26 @@ export default async function handler(req, res) {
         const movieData = { 
           title, 
           url: href, 
-          img: poster 
+          img: poster,
+          description: null,
+          wikipedia: null
         };
 
-        // Fetch Wikipedia data if enabled
+        // Always fetch Wikipedia data (enabled by default)
         if (shouldIncludeWiki) {
-          const wikiData = await fetchWikiExtract(title);
-          if (wikiData) {
-            movieData.wikipedia = wikiData;
+          try {
+            console.log(`Processing Wikipedia for movie ${i + 1}/${items.length}: ${title}`);
+            const wikiData = await fetchWikiExtract(title);
+            if (wikiData) {
+              movieData.description = wikiData.description;
+              movieData.wikipedia = {
+                title: wikiData.wikiTitle,
+                url: wikiData.wikiUrl,
+                thumbnail: wikiData.wikiThumbnail
+              };
+            }
+          } catch (error) {
+            console.error(`Wikipedia fetch failed for "${title}":`, error.message);
           }
         }
 
