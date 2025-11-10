@@ -49,9 +49,9 @@ export default async function handler(req, res) {
   if (!url)
     return res.status(400).json({ error: "Missing ?url parameter" });
 
-  // Check if Wikipedia should be included (default: false for list view to avoid slowdown)
-  // Can be enabled with ?wiki=true or ?includeWiki=true
-  const shouldIncludeWiki = wiki === 'true' || includeWiki === 'true';
+  // Check if Wikipedia should be included (default: true - always fetch Wikipedia)
+  // Can be disabled with ?wiki=false or ?includeWiki=false
+  const shouldIncludeWiki = wiki !== 'false' && includeWiki !== 'false';
 
   const baseURL = "https://moviesda14.com";
 
